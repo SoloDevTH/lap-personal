@@ -72,7 +72,7 @@ import { config } from '@/common/config';
 import { IconVideoSlash, IconVideoPlay, IconVideoReplay } from '@/common/icons';
 import videojs from 'video.js/core';
 import 'video.js/dist/video-js.min.css';
-import { getAssetSrc, isLinux, isMac, isWin } from '@/common/utils';
+import { getAssetSrc } from '@/common/utils';
 import { openFileWithApp } from '@/common/api';
 import zhCN from 'video.js/dist/lang/zh-CN.json';
 import {
@@ -217,15 +217,12 @@ let loadingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
 const directPlaybackTypes: Record<string, string> = {
   mp4: 'video/mp4',
   m4v: 'video/mp4',
-  mov: 'video/quicktime',
   webm: 'video/webm',
 };
 
 function getDirectPlaybackType(filePath: string): string | null {
   const extension = filePath.split('.').pop()?.toLowerCase() || '';
-  const supportedExtensions = isMac
-    ? ['mp4', 'm4v', 'mov', 'webm']
-    : (isWin || isLinux ? ['mp4', 'm4v', 'webm'] : []);
+  const supportedExtensions = ['mp4', 'm4v', 'webm'];
   return supportedExtensions.includes(extension) ? directPlaybackTypes[extension] : null;
 }
 
@@ -557,7 +554,7 @@ const loadVideo = async (filePath: string) => {
     try {
       const result = await prepareVideo(filePath, playerId, force, backendRequestId);
       if (currentLoadId !== currentLoadingId) return;
-      const playbackSrc = isLinux ? result.url : getAssetSrc(result.url);
+      const playbackSrc = getAssetSrc(result.url);
 
       player.reset();
       player.src({

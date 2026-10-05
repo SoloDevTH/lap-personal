@@ -1314,9 +1314,17 @@ export async function importUrl(url, folderId, folderPath) {
   }
 }
 
+/// `bytes` is an ArrayBuffer/Uint8Array sent as a raw IPC body; the other
+/// arguments go in percent-encoded headers (see import_file_bytes in Rust).
 export async function importFileBytes(bytes, name, folderId, folderPath) {
   try {
-    const result = await invoke('import_file_bytes', { bytes, name, folderId, folderPath });
+    const result = await invoke('import_file_bytes', bytes, {
+      headers: {
+        'x-file-name': encodeURIComponent(name),
+        'x-folder-id': String(folderId),
+        'x-folder-path': encodeURIComponent(folderPath),
+      },
+    });
     return result;
   } catch (error) {
     console.error('importFileBytes error:', error);
@@ -1335,25 +1343,6 @@ export async function hasImportableClipboard() {
 
 export async function importClipboard(folderId, folderPath) {
   return await invoke('import_clipboard', { folderId, folderPath });
-}
-
-export async function importFromDrag(folderId, folderPath) {
-  try {
-    const result = await invoke('import_from_drag', { folderId, folderPath });
-    return result;
-  } catch (error) {
-    console.error('importFromDrag error:', error);
-    return null;
-  }
-}
-
-export async function getDragPayload() {
-  try {
-    return await invoke('get_drag_payload');
-  } catch (error) {
-    console.error('getDragPayload error:', error);
-    return { filePaths: [], url: null };
-  }
 }
 
 export async function addFileToDb(folderId, filePath) {

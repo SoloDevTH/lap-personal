@@ -366,10 +366,7 @@ pub fn backup_databases(library_ids: &[String], dest_path: &str) -> Result<Backu
             continue;
         }
 
-        let mut db_content = Vec::new();
-        fs::File::open(path)
-            .map_err(|e| format!("Failed to read database '{}': {}", lib.name, e))?
-            .read_to_end(&mut db_content)
+        let mut db_file = fs::File::open(path)
             .map_err(|e| format!("Failed to read database '{}': {}", lib.name, e))?;
 
         let safe_name = sanitize_filename(&lib.name);
@@ -379,7 +376,8 @@ pub fn backup_databases(library_ids: &[String], dest_path: &str) -> Result<Backu
             FileOptions::<'_, ()>::default().compression_method(zip::CompressionMethod::Deflated);
         zip.start_file(&zip_path, options)
             .map_err(|e| format!("Failed to write {} to zip: {}", zip_path, e))?;
-        zip.write_all(&db_content)
+        // Stream instead of buffering: library databases can be gigabytes.
+        std::io::copy(&mut db_file, &mut zip)
             .map_err(|e| format!("Failed to write {} content: {}", zip_path, e))?;
 
         library_names.push(lib.name.clone());
@@ -432,31 +430,19 @@ pub fn restore_databases(
     let mut archive =
         ZipArchive::new(file).map_err(|e| format!("Failed to read backup zip: {}", e))?;
 
-    let mut db_entries: std::collections::HashMap<String, Vec<u8>> =
-        std::collections::HashMap::new();
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| format!("Failed to read zip entry: {}", e))?;
-        let entry_name = entry.name().to_string();
-        if !entry_name.ends_with(".db") {
-            continue;
-        }
-        let lib_name = entry_name.trim_end_matches(".db").to_string();
-        let mut content = Vec::new();
-        entry
-            .read_to_end(&mut content)
-            .map_err(|e| format!("Failed to read zip entry '{}': {}", entry_name, e))?;
-        db_entries.insert(lib_name, content);
-    }
-
     let mut restored_names = Vec::new();
     let mut existing_names: std::collections::HashSet<String> =
         config.libraries.iter().map(|l| l.name.clone()).collect();
+    let mut used_entries = std::collections::HashSet::new();
 
     for selection in selections {
-        let zip_lib_name = sanitize_filename(&selection.library_name);
-        let Some(db_content) = db_entries.remove(&zip_lib_name) else {
+        // Only touch the selected entries, streaming them straight to disk,
+        // so unselected (or oversized) entries are never loaded into memory.
+        let entry_name = format!("{}.db", sanitize_filename(&selection.library_name));
+        if !used_entries.insert(entry_name.clone()) {
+            continue;
+        }
+        let Some(entry_index) = archive.index_for_name(&entry_name) else {
             continue;
         };
 
@@ -482,12 +468,21 @@ pub fn restore_databases(
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directory for library: {}", e))?;
         }
-        fs::write(db_path_obj, &db_content).map_err(|e| {
-            format!(
+        let write_result = (|| -> Result<(), String> {
+            let mut entry = archive
+                .by_index(entry_index)
+                .map_err(|e| format!("Failed to read zip entry '{}': {}", entry_name, e))?;
+            let mut out = fs::File::create(db_path_obj).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        if let Err(e) = write_result {
+            let _ = fs::remove_file(db_path_obj);
+            return Err(format!(
                 "Failed to write database file for '{}': {}",
                 final_lib_name, e
-            )
-        })?;
+            ));
+        }
 
         config.libraries.push(new_lib);
         existing_names.insert(final_lib_name.clone());

@@ -1,7 +1,7 @@
 <div align="center">
   <img src="../docs/public/icon.png" alt="Lap Logo" width="120" style="border-radius: 20px">
   <h1>Lap - プライベート・ローカル写真管理ツール</h1>
-  <h3>macOS、Windows、Linux向けのオープンソース・デスクトップ写真管理ツール。</h3>
+  <h3>Windows向けのオープンソース・デスクトップ写真管理ツール。</h3>
   <p>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/v/release/julyx10/lap" alt="GitHub release"></a>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/downloads/julyx10/lap/total" alt="GitHub all releases"></a>
@@ -24,16 +24,7 @@ Lapは、オープンソースでローカルファーストな写真管理ツ�
 
 | プラットフォーム | パッケージ | 備考 |
 | :-- | :-- | :-- |
-| **macOS (Apple Silicon / Intel)** | `_aarch64.dmg` / `_x64.dmg` | Appleによる公証済み |
 | **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | 未署名 — SmartScreenがダウンロードをブロックした場合は、**維持する**をクリックしてください |
-| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | Debian系ディストリビューション向け（Ubuntu、Debian、Linux Mintなど） |
-
-### macOS with Homebrew
-
-```bash
-brew tap julyx10/lap
-brew install --cask lap
-```
 
 ## スクリーンショット
 
@@ -99,25 +90,6 @@ Lapは既存の写真フォルダーを直接使用します。Lapをアンイ�
 
 通常のアンインストールではアプリケーションのみが削除されます。Lapを完全に削除するには、まずLapを終了してアプリケーションをアンインストールし、その後、お使いのプラットフォームに対応するコマンドでローカルデータベース、サムネイルキャッシュ、設定ファイルを削除してください。
 
-### macOS
-
-HomebrewでLapをインストールした場合：
-
-```bash
-brew uninstall --cask lap
-```
-
-手動でインストールした場合は、Lapを終了し、`Applications`フォルダーの`Lap.app`をゴミ箱に移動してください。
-
-Lapのデータベース、キャッシュ、設定ファイルをすべて削除するには：
-
-```bash
-rm -rf "$HOME/Library/Application Support/com.julyx10.lap" \
-       "$HOME/Library/Caches/com.julyx10.lap" \
-       "$HOME/Library/WebKit/com.julyx10.lap"
-rm -f "$HOME/Library/Preferences/com.julyx10.lap.plist"
-```
-
 ### Windows
 
 **設定 > アプリ > インストールされているアプリ**を開き、**Lap**を探して**アンインストール**を選択します。
@@ -129,45 +101,21 @@ Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\com
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:APPDATA\com.julyx10.lap"
 ```
 
-### Linux
-
-Debianベースのディストリビューションでは、パッケージをアンインストールします：
-
-```bash
-sudo apt remove lap
-```
-
-次に、Lapのデータベース、キャッシュ、設定ファイルをすべて削除します：
-
-```bash
-rm -rf "$HOME/.local/share/com.julyx10.lap" \
-       "$HOME/.cache/com.julyx10.lap" \
-       "$HOME/.config/com.julyx10.lap"
-```
-
 Lapの設定でカスタムデータベース保存先を選択している場合は、そのフォルダーにLapのデータベースファイルのみが含まれていることを確認してから、別途削除してください。
 
 ## ソースからのビルド
 
 要件: Node.js 20+、pnpm、Rust stable.
 
-```bash
-# macOS システム依存関係
-xcode-select --install
-brew install nasm pkg-config autoconf automake libtool cmake
-
-# Linux システム依存関係
-# sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-#   patchelf nasm clang pkg-config autoconf automake libtool cmake
-
+```powershell
 # クローンとビルド
 git clone --recursive https://github.com/julyx10/lap.git
 cd lap
 git submodule update --init --recursive
 cargo install tauri-cli --version "^2.0.0" --locked
-./scripts/download_models.sh            # Windows: .\scripts\download_models.ps1
-./scripts/download_ffmpeg_sidecar.sh    # Windows: .\scripts\download_ffmpeg_sidecar.ps1
-cd src-vite && pnpm install && cd ..
+.\scripts\download_models.ps1
+.\scripts\download_ffmpeg_sidecar.ps1
+cd src-vite; pnpm install; cd ..
 cargo tauri dev
 ```
 
@@ -179,15 +127,7 @@ Lapは60以上の写真、RAW、動画形式に対応しています。
 | :--- | :--- |
 | 画像 | JPG/JPEG/JFIF, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL, PSD, EXR, HDR/RGBE, TGA, JPEG 2000 (JP2/J2K/J2C/JPC/JPF/JPX), DDS, DPX, QOI |
 | RAW写真 | CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, RAF, RW2, ORF, PEF, DNG, SRW, RWL, MRW, 3FR, MOS, DCR, KDC, ERF, MEF, RAW, MDC |
-| 動画 | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX など。H.264再生は全プラットフォームでサポートされており、ネイティブ再生が利用できない場合は自動的に互換性処理が行われます。HEVC/H.265およびVP9はmacOSでネイティブサポートされています。 |
-
-### Linuxでの動画再生に関する備考
-
-Linux Mint/Ubuntu/Debianでは、動画再生のサポートを向上させるために以下のパッケージをインストールしてください：
-
-```bash
-sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
-```
+| 動画 | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX など。H.264再生は全プラットフォームでサポートされており、ネイティブ再生が利用できない場合は自動的に互換性処理が行われます。 |
 
 ## アーキテクチャ
 

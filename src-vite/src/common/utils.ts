@@ -3,25 +3,8 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useUIStore } from '@/stores/uiStore';
 
-/// get the current operating system (mac, win, linux, or '')
-export function getOS() {
-  const userAgent = navigator.userAgent;
-
-  if (userAgent.includes('Mac')) {
-    return 'mac';
-  } else if (userAgent.includes('Win')) {
-    return 'win';
-  } else if (userAgent.includes('Linux') || userAgent.includes('X11')) {
-    return 'linux';
-  } else {
-    return '';
-  }
-}
-
-export const isMac = getOS() === 'mac';
-export const isWin = getOS() === 'win';
-export const isLinux = getOS() === 'linux';
-export const separator = isWin ? '\\' : '/';
+// Lap is Windows-only.
+export const separator = '\\';
 
 // scale values for window size and font size
 export const SCALE_VALUES = [0.8, 0.9, 1, 1.1, 1.2];
@@ -493,11 +476,11 @@ export function getThumbUrl(
   fileVersion = 0,
 ): string {
   if (!fileId || fileId <= 0) return '';
-  if (isWin && !bustCache) {
+  if (!bustCache) {
     const cached = getCachedThumbnailDataUrl(fileId, thumbnailSize);
     if (cached) return cached;
   }
-  const scheme = isWin ? 'http://thumb.localhost' : 'thumb://localhost';
+  const scheme = 'http://thumb.localhost';
   const base = `${scheme}/${_thumbLibraryId}/${fileId}`;
   const params = new URLSearchParams();
   if (fileVersion > 0) params.set('v', String(fileVersion));
@@ -514,7 +497,7 @@ export function getPreviewUrl(
   rawThumbnailSource = 'processed',
 ): string {
   if (!fileId || fileId <= 0) return '';
-  const scheme = isWin ? 'http://preview.localhost' : 'preview://localhost';
+  const scheme = 'http://preview.localhost';
   const base = `${scheme}/${_thumbLibraryId}/${fileId}`;
 
   const params = new URLSearchParams();
@@ -535,9 +518,6 @@ export function shouldUseBackendPreview(filePath = '', fileType = 0): boolean {
   if (Number(fileType) === 3) return true;
 
   const extension = getFileExtension(filePath).toLowerCase();
-  if (isLinux && extension === 'avif') {
-    return true;
-  }
   return [
     'tif', 'tiff', 'jxl', 'heic', 'heif', 'hif',
     'exr', 'hdr', 'rgbe', 'psd', 'jp2', 'j2k', 'j2c', 'jpc', 'jpf', 'jpx',

@@ -217,7 +217,7 @@ import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { config } from '@/common/config';
-import { isWin, isMac, isLinux, setTheme, getSlideShowInterval, SCALE_VALUES } from '@/common/utils';
+import { setTheme, getSlideShowInterval, SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut, ShortcutActionId, ShortcutPlatform, VIEW_BACKGROUND_SHORTCUTS } from '@/common/shortcuts';
 import {
   editFileComment,
@@ -249,7 +249,7 @@ const uiStore = useUIStore();
 const toast = useToast();
 
 const appWindow = getCurrentWebviewWindow()
-const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
+const shortcutPlatform: ShortcutPlatform = 'windows';
 
 // input parameters
 const fileId = ref(0);       // File ID
@@ -372,7 +372,6 @@ onMounted(async() => {
   appWindow.setFocus();
   applyViewerScale(Number(config.settings.scale || 1));
   window.addEventListener('keydown', handleKeyDown);
-  window.addEventListener('resize', handleResize);
 
   const urlParams = new URLSearchParams(window.location.search);
   
@@ -560,8 +559,6 @@ onMounted(async() => {
     isTransitionDisabled.value = false;
   }, 500);
 
-  await handleResize();
-  
   // Show window after mount (if it was created hidden)
   try {
     await appWindow.show();
@@ -572,7 +569,6 @@ onMounted(async() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown);
-  window.removeEventListener('resize', handleResize);
   document.documentElement.style.fontSize = '';
   clearSlideShowTimer();
   
@@ -747,10 +743,6 @@ const viewActionOrder: ShortcutActionId[] = [
 ];
 
 function getMatchedViewAction(event: KeyboardEvent) {
-  if (isMac && event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
-    if (event.key === 'ArrowUp') return 'view.first';
-    if (event.key === 'ArrowDown') return 'view.last';
-  }
   return viewActionOrder.find((actionId) => matchesShortcut(actionId, event, shortcutPlatform));
 }
 
@@ -856,17 +848,6 @@ function setViewerBackground(value: number) {
   void emit('settings-viewBackground-changed', config.settings.viewBackground);
 }
 
-// Handle resize event
-const handleResize = async () => {
-  if(isMac) {
-    const checkFullScreen = async () => {
-      isFullScreen.value = await appWindow.isFullscreen();
-    };
-    await checkFullScreen();
-    setTimeout(checkFullScreen, 600); 
-  }
-};
-
 /// watch appearance
 watch(() => config.settings.appearance, (newAppearance) => {
   setTheme(newAppearance, newAppearance === 0 ? config.settings.lightTheme : config.settings.darkTheme);
@@ -899,41 +880,35 @@ watch(() => isFullScreen.value, async (newFullScreen) => {
   }
   config.imageViewer.isFullScreen = newFullScreen;
 
-  if(isWin) {
-    const pauseWindowTransition = () => new Promise(resolve => setTimeout(resolve, 80));
+  const pauseWindowTransition = () => new Promise(resolve => setTimeout(resolve, 80));
 
-    if (newFullScreen) {
-      wasMaximizedBeforeFullScreen.value = await appWindow.isMaximized();
-      await appWindow.setResizable(true);
+  if (newFullScreen) {
+    wasMaximizedBeforeFullScreen.value = await appWindow.isMaximized();
+    await appWindow.setResizable(true);
 
-      if (wasMaximizedBeforeFullScreen.value) {
-        await appWindow.unmaximize();
-        await pauseWindowTransition();
-      }
-
-      if (!(await appWindow.isFullscreen())) {
-        await appWindow.setFullscreen(true);
-      }
-    } else {
-      if (await appWindow.isFullscreen()) {
-        await appWindow.setFullscreen(false);
-        await pauseWindowTransition();
-      }
-
-      await appWindow.setResizable(true);
-
-      if (wasMaximizedBeforeFullScreen.value) {
-        await appWindow.maximize();
-      }
-
-      wasMaximizedBeforeFullScreen.value = false;
+    if (wasMaximizedBeforeFullScreen.value) {
+      await appWindow.unmaximize();
+      await pauseWindowTransition();
     }
-  } else if (isMac) {
-      if (newFullScreen !== await appWindow.isFullscreen()) {
-        await appWindow.setFullscreen(newFullScreen);
+
+    if (!(await appWindow.isFullscreen())) {
+      await appWindow.setFullscreen(true);
     }
+  } else {
+    if (await appWindow.isFullscreen()) {
+      await appWindow.setFullscreen(false);
+      await pauseWindowTransition();
+    }
+
+    await appWindow.setResizable(true);
+
+    if (wasMaximizedBeforeFullScreen.value) {
+      await appWindow.maximize();
+    }
+
+    wasMaximizedBeforeFullScreen.value = false;
   }
-}); 
+});
 
 watch(() => isSyncViewport.value, (isSync) => {
   if (!isCompareModeSession.value) return;

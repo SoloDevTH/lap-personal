@@ -14,7 +14,7 @@
         <TButton
           :icon="IconExternal"
           buttonSize="small"
-          :tooltip="isMac ? $t('menu.file.reveal_in_finder') : $t('menu.file.reveal_in_file_explorer')"
+          :tooltip="$t('menu.file.reveal_in_file_explorer')"
           @click.stop="revealCurrentFile"
         />
       </div>
@@ -47,7 +47,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useUIStore } from '@/stores/uiStore';
 import { revealPath } from '@/common/api';
-import { isMac } from '@/common/utils';
 import { IconExternal } from '@/common/icons';
 import ModalDialog from '@/components/ModalDialog.vue';
 import TButton from '@/components/TButton.vue';

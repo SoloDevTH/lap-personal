@@ -186,7 +186,6 @@ import {
   getThumbUrl,
   getThumbnailDataUrl,
   getThumbnailDataUrlInflight,
-  isWin,
   setThumbnailDataUrlInflight,
 } from '@/common/utils';
 import { getFacesForFile, getFileThumbById, getFfmpegBackedImageExtensions } from '@/common/api';
@@ -417,7 +416,6 @@ async function getEffectiveThumbnailSrc() {
   const fileId = props.fileId;
   if (!fileId) return '';
   const thumbUrl = getThumbUrl(fileId, false, config.settings.thumbnailSize, props.fileVersion);
-  if (!isWin) return thumbUrl;
   if (thumbUrl.startsWith('data:')) {
     resolvedThumbnailSrc.value = thumbUrl;
     resolvedThumbnailFileId.value = fileId;

@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/public/icon.png" alt="Lap Logo" width="120" style="border-radius: 20px">
   <h1>Lap - Private Local Photo Manager</h1>
-  <h3>Open-source desktop photo manager for macOS, Windows, and Linux.</h3>
+  <h3>Open-source desktop photo manager for Windows.</h3>
   <p>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/v/release/julyx10/lap" alt="GitHub release"></a>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/downloads/julyx10/lap/total" alt="GitHub all releases"></a>
@@ -25,16 +25,7 @@ Open the [latest release page](https://github.com/julyx10/lap/releases/latest), 
 
 | Platform | Package | Note |
 | :-- | :-- | :-- |
-| **macOS (Apple Silicon / Intel)** | `_aarch64.dmg` / `_x64.dmg` | Notarized by Apple |
 | **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | Unsigned — if SmartScreen blocks the download, click **Keep anyway** |
-| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | For Debian-based distros (Ubuntu, Debian, Linux Mint, etc.) |
-
-### macOS with Homebrew
-
-```bash
-brew tap julyx10/lap
-brew install --cask lap
-```
 
 ## Screenshots
 
@@ -98,28 +89,7 @@ Deleting Lap's database or configuration removes this local organization and ind
 
 Lap works directly with your existing photo folders. Uninstalling Lap, or deleting its database and cache files, does **not** delete your original photos.
 
-The standard uninstall steps remove the application. To remove Lap completely, quit Lap first, uninstall the application, then delete its local database, thumbnail cache, and configuration files using the cleanup command for your platform.
-
-### macOS
-
-If you installed Lap with Homebrew:
-
-```bash
-brew uninstall --cask lap
-```
-
-For a manual installation, quit Lap and move `Lap.app` from the `Applications` folder to the Trash.
-
-To remove all Lap database, cache, and configuration files:
-
-```bash
-rm -rf "$HOME/Library/Application Support/com.julyx10.lap" \
-       "$HOME/Library/Caches/com.julyx10.lap" \
-       "$HOME/Library/WebKit/com.julyx10.lap"
-rm -f "$HOME/Library/Preferences/com.julyx10.lap.plist"
-```
-
-### Windows
+The standard uninstall steps remove the application. To remove Lap completely, quit Lap first, uninstall the application, then delete its local database, thumbnail cache, and configuration files.
 
 Open **Settings > Apps > Installed apps**, find **Lap**, and select **Uninstall**.
 
@@ -130,45 +100,20 @@ Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\com
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:APPDATA\com.julyx10.lap"
 ```
 
-### Linux
-
-For Debian-based distributions, uninstall the package:
-
-```bash
-sudo apt remove lap
-```
-
-Then remove all Lap database, cache, and configuration files:
-
-```bash
-rm -rf "$HOME/.local/share/com.julyx10.lap" \
-       "$HOME/.cache/com.julyx10.lap" \
-       "$HOME/.config/com.julyx10.lap"
-```
-
 If you selected a custom database storage directory in Lap settings, delete that directory separately after confirming that it contains only Lap database files.
 
 ## Build from Source
 
-Requirements: Node.js 20+, pnpm, Rust stable.
+Requirements: Windows 10/11, Visual Studio 2022 Build Tools (C++ workload), CMake, Node.js 20+, pnpm, Rust stable (MSVC toolchain).
 
-```bash
-# macOS system deps
-xcode-select --install
-brew install nasm pkg-config autoconf automake libtool cmake
-
-# Linux system deps
-# sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-#   patchelf nasm clang pkg-config autoconf automake libtool cmake
-
-# Clone and build
+```powershell
 git clone --recursive https://github.com/julyx10/lap.git
 cd lap
 git submodule update --init --recursive
 cargo install tauri-cli --version "^2.0.0" --locked
-./scripts/download_models.sh            # Windows: .\scripts\download_models.ps1
-./scripts/download_ffmpeg_sidecar.sh    # Windows: .\scripts\download_ffmpeg_sidecar.ps1
-cd src-vite && pnpm install && cd ..
+.\scripts\download_models.ps1
+.\scripts\download_ffmpeg_sidecar.ps1
+cd src-vite; pnpm install; cd ..
 cargo tauri dev
 ```
 
@@ -180,15 +125,7 @@ Lap supports 60+ photo, RAW, and video formats.
 | :--- | :--- |
 | Images | JPG/JPEG/JFIF, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL, PSD, EXR, HDR/RGBE, TGA, JPEG 2000 (JP2/J2K/J2C/JPC/JPF/JPX), DDS, DPX, QOI |
 | RAW photos | CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, RAF, RW2, ORF, PEF, DNG, SRW, RWL, MRW, 3FR, MOS, DCR, KDC, ERF, MEF, RAW, MDC |
-| Videos | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX and more. H.264 playback is supported on all platforms, with automatic compatibility processing when native playback is unavailable. HEVC/H.265 and VP9 are natively supported on macOS. |
-
-### Linux Video Playback Notes
-
-On Ubuntu/Debian/Linux Mint, install these packages for better video playback support:
-
-```bash
-sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
-```
+| Videos | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX and more. H.264 MP4 plays natively; other formats are converted automatically for playback. |
 
 ## Architecture
 

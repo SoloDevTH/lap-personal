@@ -209,7 +209,7 @@
 <script setup lang="ts">
 import { computed, type CSSProperties } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { formatFileSize, formatTimestamp, isMac } from '@/common/utils';
+import { formatFileSize, formatTimestamp } from '@/common/utils';
 import {
   IconChecked,
   IconUnChecked,

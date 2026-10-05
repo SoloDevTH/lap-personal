@@ -28,12 +28,6 @@
         :tooltip="t(config.infoPanel.mapTheme === 0 ? 'map.standard' : 'map.satellite')"
         @click="toggleMap"
       />
-      <TButton
-        v-if="showAppleMapsButton"
-        :icon="IconExternal"
-        :tooltip="t('file_info.open_apple_maps')"
-        @click="openAppleMaps"
-      />
     </div>
   </div>
 </template>
@@ -42,12 +36,10 @@
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { config } from '@/common/config'
-import { openExternalUrl } from '@/common/api'
 import { createTileLayerGroup, getGlobalMapTheme, getMapTheme } from '@/common/mapProviders'
-import { isMac } from '@/common/utils'
 import { useUIStore } from '@/stores/uiStore'
 
-import { IconZoomIn, IconZoomOut, IconMapCenter, IconMapDefault, IconMapSatellite, IconExternal } from '@/common/icons'
+import { IconZoomIn, IconZoomOut, IconMapCenter, IconMapDefault, IconMapSatellite } from '@/common/icons'
 import TButton from '@/components/TButton.vue'
 
 import L from 'leaflet'
@@ -91,7 +83,6 @@ let tileErrorFallbackTriggered = false
 let zoom = ref(props.zoom)
 let activeMaxZoom = ref(19)
 let resizeObserver = null
-const showAppleMapsButton = computed(() => isMac && validLatLon(props.lat, props.lon))
 
 onMounted(() => {
   map = L.map(mapEl.value, {
@@ -219,12 +210,6 @@ function applyTheme(theme, isFallback) {
   })
 }
 
-async function openAppleMaps() {
-  if (!showAppleMapsButton.value) return
-  const label = props.label?.trim() || 'Lap'
-  const url = `maps://?ll=${props.lat},${props.lon}&q=${encodeURIComponent(label)}`
-  await openExternalUrl(url)
-}
 
 function handleMapKeyDown(event) {
   const target = event.target

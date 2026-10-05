@@ -65,25 +65,6 @@ pub fn trash_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn move_to_trash(path: &str) -> Result<(), String> {
-    use trash::macos::{DeleteMethod, TrashContextExtMacos};
-
-    // NsFileManager is fast but requires Automation permission that users may deny.
-    // When denied, Put Back metadata is lost. Fall back to Finder (AppleScript) which
-    // always preserves Put Back metadata and does not require special permissions.
-    let mut context = trash::TrashContext::default();
-    context.set_delete_method(DeleteMethod::NsFileManager);
-    if let Err(_error) = context.delete(path) {
-        let mut fallback = trash::TrashContext::default();
-        fallback.set_delete_method(DeleteMethod::Finder);
-        fallback.delete(path).map_err(|fallback_error| fallback_error.to_string())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(all(not(target_os = "macos")))]
 fn move_to_trash(path: &str) -> Result<(), String> {
     trash::delete(path).map_err(|error| error.to_string())
 }
@@ -468,11 +449,6 @@ fn has_hidden_attribute(metadata: &std::fs::Metadata) -> bool {
     (metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
 }
 
-#[cfg(not(target_os = "windows"))]
-fn has_hidden_attribute(_metadata: &std::fs::Metadata) -> bool {
-    false
-}
-
 pub fn is_hidden(entry: &walkdir::DirEntry) -> bool {
     is_dotfile(entry.file_name())
         || entry
@@ -550,12 +526,6 @@ impl FileInfo {
 }
 
 /// Return a stable filesystem identifier for rename detection.
-#[cfg(unix)]
-fn file_id(path: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    fs::metadata(path).ok().map(|m| m.ino())
-}
-
 #[cfg(windows)]
 fn file_id(path: &Path) -> Option<u64> {
     use std::ffi::OsStr;
@@ -708,15 +678,6 @@ fn command_stdout(mut command: Command) -> Option<String> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn resolve_external_app_display_name(app_path: &str) -> Option<String> {
-    command_stdout({
-        let mut command = Command::new("mdls");
-        command.args(["-name", "kMDItemDisplayName", "-raw", app_path]);
-        command
-    })
-}
-
 #[cfg(target_os = "windows")]
 fn resolve_external_app_display_name(app_path: &str) -> Option<String> {
     let script = r#"
@@ -766,30 +727,6 @@ exit 1
             .creation_flags(CREATE_NO_WINDOW);
         command
     })
-}
-
-#[cfg(target_os = "linux")]
-fn resolve_external_app_display_name(app_path: &str) -> Option<String> {
-    let path = Path::new(app_path);
-    let lower_path = app_path.to_lowercase();
-    if lower_path.ends_with(".desktop") {
-        let desktop_file = fs::read_to_string(path).ok()?;
-        for line in desktop_file.lines() {
-            if let Some(name) = line.strip_prefix("Name=") {
-                let trimmed = name.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn resolve_external_app_display_name(_app_path: &str) -> Option<String> {
-    None
 }
 
 pub fn get_external_app_display_name(app_path: &str) -> Result<String, String> {
@@ -1744,15 +1681,6 @@ pub fn reveal_path(path: &str) -> Result<(), String> {
 
     let is_dir = Path::new(path).is_dir();
 
-    #[cfg(target_os = "macos")]
-    {
-        let mut cmd = Command::new("open");
-        if !is_dir {
-            cmd.arg("-R");
-        }
-        cmd.arg(path).spawn().map_err(|e| e.to_string())?;
-    }
-
     #[cfg(target_os = "windows")]
     {
         let mut cmd = Command::new("explorer");
@@ -1762,22 +1690,6 @@ pub fn reveal_path(path: &str) -> Result<(), String> {
             cmd.arg("/select,").arg(path);
         }
         cmd.spawn().map_err(|e| e.to_string())?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let target = Path::new(path);
-        let reveal_target = if target.is_dir() {
-            path.to_string()
-        } else {
-            target
-                .parent()
-                .and_then(|parent| parent.to_str())
-                .ok_or_else(|| "Failed to resolve parent directory".to_string())?
-                .to_string()
-        };
-
-        opener::open(reveal_target).map_err(|e| e.to_string())?;
     }
 
     Ok(())
@@ -3911,14 +3823,6 @@ pub async fn index_album_worker(
             let created_at = metadata
                 .as_ref()
                 .and_then(|metadata| systemtime_to_timestamp(metadata.created().ok()));
-            #[cfg(unix)]
-            let inode = {
-                use std::os::unix::fs::MetadataExt;
-                metadata
-                    .as_ref()
-                    .map(|metadata| metadata.ino() as i64)
-                    .filter(|inode| *inode != 0)
-            };
             #[cfg(windows)]
             let inode = FileInfo::new(&directory_path)
                 .ok()

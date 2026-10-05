@@ -269,7 +269,6 @@ import {
   getThumbUrl,
   getThumbnailDataUrl,
   getThumbnailDataUrlInflight,
-  isWin,
   setThumbnailDataUrlInflight,
   openFolderDialog,
 } from '@/common/utils';
@@ -725,7 +724,7 @@ const loadAlbumCover = async (
   delete albumCoverErrors.value[albumId];
   if (coverFileId) {
     let url = getThumbUrl(coverFileId, bustCache, config.settings.thumbnailSize);
-    if (isWin && !url.startsWith('data:')) {
+    if (!url.startsWith('data:')) {
       const inflight = getThumbnailDataUrlInflight(coverFileId, config.settings.thumbnailSize);
       const dataUrl = await (inflight || setThumbnailDataUrlInflight(
         coverFileId,

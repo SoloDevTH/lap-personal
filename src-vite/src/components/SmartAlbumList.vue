@@ -132,7 +132,7 @@ import { useI18n } from 'vue-i18n';
 import { VueDraggable } from 'vue-draggable-plus';
 import { config, libConfig } from '@/common/config';
 import { useUIStore } from '@/stores/uiStore';
-import { getThumbUrl, getThumbnailDataUrl, getThumbnailDataUrlInflight, isWin, setThumbnailDataUrlInflight } from '@/common/utils';
+import { getThumbnailDataUrl, getThumbnailDataUrlInflight, setThumbnailDataUrlInflight } from '@/common/utils';
 import { getFileThumbById, getSmartQueryCountAndSum } from '@/common/api';
 import { IconAdd, IconClose, IconDragHandle, IconEdit, IconMore, IconFolderCog, IconOrder, IconSearch, IconTrash } from '@/common/icons';
 import TButton from '@/components/TButton.vue';
@@ -220,11 +220,10 @@ watch(smartAlbumSearch, () => {
 const getSmartAlbumCoverSrc = (smartAlbum: any) => {
   const coverFileId = Number(smartAlbum?.coverFileId || 0);
   if (!coverFileId) return '';
-  return isWin ? smartAlbumCoverUrls.value[String(smartAlbum.id)] || '' : getThumbUrl(coverFileId, false, config.settings.thumbnailSize);
+  return smartAlbumCoverUrls.value[String(smartAlbum.id)] || '';
 };
 
 const loadWindowsSmartAlbumCovers = async (albums: any[]) => {
-  if (!isWin) return;
   const loadToken = ++smartAlbumCoverLoadToken;
 
   const covers = await Promise.all(albums.map(async (smartAlbum) => {

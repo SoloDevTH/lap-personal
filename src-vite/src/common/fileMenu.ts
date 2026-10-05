@@ -38,7 +38,6 @@ type ExternalAppKind = 'image' | 'video';
 export const useFileMenuItems = (
   file: Ref<any>,
   localeMsg: Ref<any>,
-  isMac: boolean,
   translate: (key: string) => string,
   onAction: (action: string) => void,
   options?: {
@@ -266,7 +265,7 @@ export const useFileMenuItems = (
         ]
       },
       {
-        label: isMac ? localeMsg.value.menu.file.reveal_in_finder : localeMsg.value.menu.file.reveal_in_file_explorer,
+        label: localeMsg.value.menu.file.reveal_in_file_explorer,
         shortcut: shortcut('file.reveal'),
         action: createAction('reveal')
       },

@@ -61,18 +61,6 @@ pub fn init_ffmpeg_path(app: &AppHandle) {
     }
 }
 
-/// Get video url for different platforms
-fn platform_video_url(file_path: &str) -> Result<String, String> {
-    #[cfg(target_os = "linux")]
-    {
-        crate::t_http::make_video_stream_url(file_path)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok(file_path.to_string())
-    }
-}
-
 /// Manages active FFmpeg/FFprobe processes, allowing per-player cancellation.
 pub struct VideoManager {
     pub active_processes: Mutex<HashMap<String, (u64, tokio::process::Child)>>,
@@ -102,54 +90,22 @@ async fn finish_video_request(state: &VideoManager, player_id: &str, request_id:
 }
 
 fn ffmpeg_sidecar_name() -> &'static str {
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        "ffmpeg-x86_64-apple-darwin"
-    }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "ffmpeg-aarch64-apple-darwin"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        "ffmpeg-x86_64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        "ffmpeg-aarch64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
         "ffmpeg-x86_64-pc-windows-msvc.exe"
     }
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    #[cfg(target_arch = "aarch64")]
     {
         "ffmpeg-aarch64-pc-windows-msvc.exe"
     }
 }
 
 fn ffprobe_sidecar_name() -> &'static str {
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        "ffprobe-x86_64-apple-darwin"
-    }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "ffprobe-aarch64-apple-darwin"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        "ffprobe-x86_64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        "ffprobe-aarch64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
         "ffprobe-x86_64-pc-windows-msvc.exe"
     }
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    #[cfg(target_arch = "aarch64")]
     {
         "ffprobe-aarch64-pc-windows-msvc.exe"
     }
@@ -164,16 +120,12 @@ fn find_sidecar(name: &str) -> Option<PathBuf> {
 
 fn sidecar_command(sidecar_name: &str, fallback: &str) -> tokio::process::Command {
     let bin = find_sidecar(sidecar_name).unwrap_or_else(|| PathBuf::from(fallback));
-    #[cfg(unix)]
-    {
-        let mut cmd = tokio::process::Command::new("nice");
-        cmd.arg("-n").arg("19").arg(bin);
-        cmd
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::process::Command::new(bin)
-    }
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+    let mut cmd = tokio::process::Command::new(bin);
+    // Hide the console window and keep background decoding from starving the UI.
+    cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+    cmd
 }
 
 fn ffprobe_command() -> tokio::process::Command {
@@ -237,12 +189,6 @@ async fn probe_json_with_timeout(file_path: &str, timeout_secs: u64) -> Result<V
         "1",
         file_path,
     ]);
-
-    // Hide console window on Windows.
-    #[cfg(target_os = "windows")]
-    {
-        cmd.creation_flags(0x08000000);
-    }
 
     let probe_child = cmd
         .stdin(std::process::Stdio::null())
@@ -315,7 +261,6 @@ pub async fn get_video_duration(file_path: &str) -> Result<u64, String> {
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 enum ThumbnailStrategy {
     FastSeek(u64),
     SlowSeek(u64),
@@ -445,11 +390,6 @@ async fn run_thumbnail_command(
         ffmpeg_threads,
         "pipe:1",
     ]);
-
-    #[cfg(target_os = "windows")]
-    {
-        cmd.creation_flags(0x08000000);
-    }
 
     let child = cmd
         .stdin(std::process::Stdio::null())
@@ -888,59 +828,23 @@ async fn analyze_strategy(json: &Value, file_path: &str) -> VideoAction {
         || match a_codec {
             "aac" => matches!(a_profile_str, "LC" | "Main" | "") && a_channels <= 2,
             "mp3" => a_channels <= 2,
-            "ac3" | "eac3" => cfg!(target_os = "macos"),
             _ => false,
         };
 
-    // 3. Container & Platform Specifics
+    // 3. Container specifics
     let is_mp4 = fmt.contains("mp4") || fmt.contains("m4v");
     let is_mov = fmt.contains("mov");
     let is_safe_mp4_audio = a_ok && (is_mp4 || is_mov);
 
-    #[cfg(target_os = "macos")]
-    {
-        let direct_ok = match v_codec {
-            "h264" => is_safe_mp4_audio,
-            "hevc" => is_safe_mp4_audio,
-            "vp9" => is_safe_mp4_audio && is_mp4,
-            _ => false,
-        };
-
-        if direct_ok {
-            if (is_mp4 || is_mov) && is_moov_at_start_async(file_path).await.unwrap_or(false) {
-                return VideoAction::Direct;
-            }
-            return VideoAction::Remux;
+    if v_codec == "h264" && is_safe_mp4_audio {
+        if is_mp4 && is_moov_at_start_async(file_path).await.unwrap_or(false) {
+            return VideoAction::Direct;
         }
+        return VideoAction::Remux;
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    {
-        if v_codec == "h264" && is_safe_mp4_audio {
-            if is_mp4 && is_moov_at_start_async(file_path).await.unwrap_or(false) {
-                return VideoAction::Direct;
-            }
-            return if is_mp4 || is_mov {
-                VideoAction::Remux
-            } else {
-                VideoAction::Transcode
-            };
-        }
-        #[cfg(target_os = "windows")]
-        if v_codec == "hevc" && (is_mp4 || is_mov) && a_ok {
-            // Edge WebView2 can accept the container while still failing video decode,
-            // which shows up as audio-only playback for some MOV/HEVC files.
-            return VideoAction::Transcode;
-        }
-
-        #[cfg(target_os = "linux")]
-        if v_codec == "hevc" && (is_mp4 || is_mov) && a_ok {
-            // Linux WebKitGTK support varies by distro/codec pack. Keep the cheaper remux path
-            // and let the frontend fall back to an external player if decode still fails.
-            return VideoAction::Remux;
-        }
-    }
-
+    // Everything else (including MOV/HEVC: WebView2 can accept the container
+    // yet fail video decode, giving audio-only playback) is transcoded.
     VideoAction::Transcode
 }
 
@@ -1141,7 +1045,7 @@ pub async fn prepare_video(
 
     if action == VideoAction::Direct && !force_process && !force_compatible {
         let result = VideoPrepareResult {
-            url: platform_video_url(&file_path)?,
+            url: file_path.clone(),
             action: VideoAction::Direct,
         };
         finish_video_request(&state, &player_id, request_id).await;
@@ -1159,8 +1063,6 @@ pub async fn prepare_video(
     } else {
         action
     };
-    #[cfg(target_os = "macos")]
-    let mut try_software_enc = false;
 
     let temp_dir = app
         .path()
@@ -1181,7 +1083,7 @@ pub async fn prepare_video(
     if let Ok(meta) = tokio::fs::metadata(&output_path).await {
         if meta.len() > 32 * 1024 && (force.is_none() || force_compatible) {
             let result = VideoPrepareResult {
-                url: platform_video_url(output_path.to_string_lossy().as_ref())?,
+                url: output_path.to_string_lossy().into_owned(),
                 action: current_action,
             };
             finish_video_request(&state, &player_id, request_id).await;
@@ -1210,14 +1112,6 @@ pub async fn prepare_video(
                 "-y",
             ]);
         } else {
-            // Transcode: macOS tries hardware encoding first, all others use libx264
-            #[cfg(target_os = "macos")]
-            if !try_software_enc {
-                cmd.args(["-c:v", "h264_videotoolbox", "-b:v", "4000k"]);
-            } else {
-                cmd.args(["-c:v", "libx264", "-preset", "superfast", "-crf", "23"]);
-            }
-            #[cfg(not(target_os = "macos"))]
             cmd.args(["-c:v", "libx264", "-preset", "superfast", "-crf", "23"]);
             cmd.args([
                 "-c:a",
@@ -1232,10 +1126,6 @@ pub async fn prepare_video(
             ]);
         }
         cmd.arg(&tmp_path);
-        #[cfg(target_os = "windows")]
-        {
-            cmd.creation_flags(0x08000000);
-        }
 
         cmd.stderr(debug_stderr());
 
@@ -1336,13 +1226,12 @@ pub async fn prepare_video(
                 let _ = tokio::fs::remove_file(&tmp_path).await;
                 finish_video_request(&state, &player_id, request_id).await;
                 return Ok(VideoPrepareResult {
-                    url: platform_video_url(output_path.to_string_lossy().as_ref())?,
+                    url: output_path.to_string_lossy().into_owned(),
                     action: current_action,
                 });
             }
 
             // Windows: rename fails if destination exists
-            #[cfg(target_os = "windows")]
             let _ = tokio::fs::remove_file(&output_path).await;
             if tokio::fs::rename(&tmp_path, &output_path).await.is_ok() {
                 let td = temp_dir.clone();
@@ -1351,7 +1240,7 @@ pub async fn prepare_video(
                 });
                 finish_video_request(&state, &player_id, request_id).await;
                 return Ok(VideoPrepareResult {
-                    url: platform_video_url(output_path.to_string_lossy().as_ref())?,
+                    url: output_path.to_string_lossy().into_owned(),
                     action: current_action,
                 });
             }
@@ -1373,12 +1262,6 @@ pub async fn prepare_video(
             if current_action == VideoAction::Remux {
                 // FALLBACK PASS 1: Remux failed, transition to Transcode
                 current_action = VideoAction::Transcode;
-                continue;
-            }
-            #[cfg(target_os = "macos")]
-            if current_action == VideoAction::Transcode && !try_software_enc {
-                // FALLBACK PASS 2: macOS Hardware encoding failed, switch to Software (libx264)
-                try_software_enc = true;
                 continue;
             }
             finish_video_request(&state, &player_id, request_id).await;

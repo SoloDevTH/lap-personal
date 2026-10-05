@@ -16,7 +16,7 @@ import { useConfigStore } from '@/stores/configStore';
 import { useLibraryStore } from '@/stores/libraryStore';
 import { useUIStore } from '@/stores/uiStore';
 import { clearIndexRecoveryInfo } from '@/common/api';
-import { isMac, setTheme, SCALE_VALUES } from '@/common/utils';
+import { setTheme, SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut } from '@/common/shortcuts';
 import ToastContainer from '@/components/ToastContainer.vue';
 
@@ -59,13 +59,6 @@ onMounted(async () => {
         try {
           event.preventDefault();
 
-          if (isMac) {
-            // macOS convention: close hides the window; the app stays alive and
-            // can be reopened from the Dock. Quitting still uses the native menu.
-            await win.hide();
-            return;
-          }
-
           try {
             if (libConfig._initialized) {
               // Mark scanning as paused so it won't auto-resume on restart
@@ -85,9 +78,7 @@ onMounted(async () => {
       });
     } else {
       unlistenMainCloseRequested = await win.listen('tauri://close-requested', async () => {
-        if (isMac) {
-          await win.hide();
-        } else if (libConfig._initialized) {
+        if (libConfig._initialized) {
           // Mark scanning as paused so it won't auto-resume on restart
           if (libConfig.index.status === 1) {
             libConfig.index.status = 2;
@@ -135,7 +126,7 @@ const handleKeyDown = (event) => {
     return;
   }
 
-  if (!isMac && matchesShortcut('app.preferences', event)) {
+  if (matchesShortcut('app.preferences', event)) {
     event.preventDefault();
     event.stopPropagation();
     emit('app-open-preferences');

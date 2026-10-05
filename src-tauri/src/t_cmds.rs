@@ -32,6 +32,16 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
 
+/// Run blocking SQLite work on the blocking pool so async command workers
+/// stay free while the grid issues many queries at once.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("Failed to join query task: {}", e))?
+}
+
 // cancellation token for indexing
 pub struct IndexCancellation(pub Arc<Mutex<HashMap<i64, bool>>>);
 pub struct ImportCancellation(pub Arc<Mutex<ImportState>>);
@@ -810,7 +820,7 @@ pub fn open_external_url(url: &str) -> Result<(), String> {
 /// system's default layout. A RAW+JPEG pair supplies its JPEG/HEIC companion.
 #[tauri::command]
 pub async fn set_desktop_wallpaper(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     file_path: &str,
     companion_path: Option<String>,
 ) -> Result<(), String> {
@@ -819,46 +829,6 @@ pub async fn set_desktop_wallpaper(
         .unwrap_or_else(|| file_path.to_string());
     if !Path::new(&source_path).is_file() {
         return Err("Wallpaper source file does not exist".to_string());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        app_handle
-            .run_on_main_thread(move || {
-                use objc2::MainThreadMarker;
-                use objc2::runtime::AnyObject;
-                use objc2_app_kit::{NSScreen, NSWorkspace, NSWorkspaceDesktopImageOptionKey};
-                use objc2_foundation::{NSDictionary, NSString, NSURL};
-
-                let result = (|| {
-                    let main_thread = MainThreadMarker::new().ok_or_else(|| {
-                        "macOS wallpaper updates must run on the main thread".to_string()
-                    })?;
-                    let screen = NSScreen::mainScreen(main_thread)
-                        .ok_or_else(|| "macOS could not find the primary display".to_string())?;
-                    let path = NSString::from_str(&source_path);
-                    let url = NSURL::fileURLWithPath(&path);
-                    let options: objc2::rc::Retained<
-                        NSDictionary<NSWorkspaceDesktopImageOptionKey, AnyObject>,
-                    > = NSDictionary::new();
-                    unsafe {
-                        NSWorkspace::sharedWorkspace()
-                            .setDesktopImageURL_forScreen_options_error(&url, &screen, &options)
-                    }
-                    .map_err(|error| {
-                        format!(
-                            "macOS could not set the desktop wallpaper: {}",
-                            error.localizedDescription()
-                        )
-                    })
-                })();
-                let _ = sender.send(result);
-            })
-            .map_err(|error| format!("Failed to schedule macOS wallpaper update: {error}"))?;
-        receiver
-            .await
-            .map_err(|_| "macOS wallpaper update was cancelled".to_string())??;
     }
 
     #[cfg(target_os = "windows")]
@@ -905,44 +875,6 @@ pub async fn set_desktop_wallpaper(
         receiver.await.map_err(|_| "Windows wallpaper update was cancelled".to_string())??;
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-
-        const URI_PATH_ENCODE_SET: &AsciiSet = &CONTROLS
-            .add(b' ')
-            .add(b'"')
-            .add(b'#')
-            .add(b'%')
-            .add(b'<')
-            .add(b'>')
-            .add(b'?')
-            .add(b'[')
-            .add(b'\\')
-            .add(b']')
-            .add(b'^')
-            .add(b'`')
-            .add(b'{')
-            .add(b'|')
-            .add(b'}');
-
-        let file_uri = format!("file://{}", utf8_percent_encode(&source_path, URI_PATH_ENCODE_SET));
-        let set_key = |key: &str| Command::new("gsettings")
-            .args(["set", "org.gnome.desktop.background", key, &file_uri])
-            .output();
-        let output = set_key("picture-uri")
-            .map_err(|error| format!("Failed to start GNOME wallpaper service: {error}"))?;
-        if !output.status.success() {
-            return Err(
-                "This Linux desktop environment does not support setting wallpapers from Lap"
-                    .to_string(),
-            );
-        }
-        // GNOME 42+ can use a separate dark wallpaper. Older schemas simply
-        // reject this key, which is safe to ignore after picture-uri succeeds.
-        let _ = set_key("picture-uri-dark");
-    }
-
     Ok(())
 }
 
@@ -966,17 +898,6 @@ pub fn open_files_with_app(file_paths: Vec<String>, app_path: &str) -> Result<()
         return Err("Missing file path or app path".to_string());
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg("-a")
-            .arg(app_path)
-            .args(&file_paths)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-
-    #[cfg(not(target_os = "macos"))]
     {
         Command::new(app_path)
             .args(&file_paths)
@@ -992,15 +913,15 @@ pub fn open_files_with_app(file_paths: Vec<String>, app_path: &str) -> Result<()
 /// get query count and sum
 #[tauri::command]
 pub async fn get_query_count_and_sum(params: QueryParams) -> Result<(i64, i64), String> {
-    AFile::get_query_count_and_sum(&params)
-        .map_err(|e| format!("Error while getting query files count: {}", e))
+    blocking(move || AFile::get_query_count_and_sum(&params)
+        .map_err(|e| format!("Error while getting query files count: {}", e))).await
 }
 
 /// get query time line
 #[tauri::command]
 pub async fn get_query_time_line(params: QueryParams) -> Result<Vec<ATimeLine>, String> {
-    AFile::get_query_time_line(&params)
-        .map_err(|e| format!("Error while getting query timeline: {}", e))
+    blocking(move || AFile::get_query_time_line(&params)
+        .map_err(|e| format!("Error while getting query timeline: {}", e))).await
 }
 
 /// get query file
@@ -1010,15 +931,15 @@ pub async fn get_query_files(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<AFile>, String> {
-    AFile::get_query_files(&params, offset, limit)
-        .map_err(|e| format!("Error while getting query files: {}", e))
+    blocking(move || AFile::get_query_files(&params, offset, limit)
+        .map_err(|e| format!("Error while getting query files: {}", e))).await
 }
 
 /// Get file metadata for a bounded set of IDs without traversing a virtualized query.
 #[tauri::command]
 pub async fn get_files_by_ids(file_ids: Vec<i64>) -> Result<Vec<AFile>, String> {
-    AFile::get_files_by_ids(&file_ids)
-        .map_err(|e| format!("Error while getting files by IDs: {}", e))
+    blocking(move || AFile::get_files_by_ids(&file_ids)
+        .map_err(|e| format!("Error while getting files by IDs: {}", e))).await
 }
 
 /// Get grouped render rows for a normal query.
@@ -1029,16 +950,16 @@ pub async fn get_grouped_query_rows(
     offset: i64,
     limit: i64,
 ) -> Result<GroupedQueryResult, String> {
-    AFile::get_grouped_query_rows(&params, offset, limit)
-        .map_err(|e| format!("Error while getting grouped query rows: {}", e))
+    blocking(move || AFile::get_grouped_query_rows(&params, offset, limit)
+        .map_err(|e| format!("Error while getting grouped query rows: {}", e))).await
 }
 
 /// Get all file ids in one group for a normal query.
 /// Used by the group header checkbox so selecting a group is not limited to loaded rows.
 #[tauri::command]
 pub async fn get_group_file_ids(params: QueryParams, group_id: String) -> Result<Vec<i64>, String> {
-    AFile::get_group_file_ids(&params, &group_id)
-        .map_err(|e| format!("Error while getting group file ids: {}", e))
+    blocking(move || AFile::get_group_file_ids(&params, &group_id)
+        .map_err(|e| format!("Error while getting group file ids: {}", e))).await
 }
 
 /// Get a file's index in the flattened grouped query result.
@@ -1047,16 +968,16 @@ pub async fn get_grouped_file_position(
     params: QueryParams,
     file_id: i64,
 ) -> Result<Option<i64>, String> {
-    AFile::get_grouped_file_position(&params, file_id)
-        .map_err(|e| format!("Error while getting grouped file position: {}", e))
+    blocking(move || AFile::get_grouped_file_position(&params, file_id)
+        .map_err(|e| format!("Error while getting grouped file position: {}", e))).await
 }
 
 /// Get all file ids in the current normal query.
 /// Used by Select All to support large virtualized result sets without loading every file object.
 #[tauri::command]
 pub async fn get_query_file_ids(params: QueryParams) -> Result<Vec<i64>, String> {
-    AFile::get_query_file_ids(&params)
-        .map_err(|e| format!("Error while getting query file ids: {}", e))
+    blocking(move || AFile::get_query_file_ids(&params)
+        .map_err(|e| format!("Error while getting query file ids: {}", e))).await
 }
 
 #[tauri::command]
@@ -1070,8 +991,8 @@ pub async fn get_query_file_position(
     params: QueryParams,
     file_id: i64,
 ) -> Result<Option<i64>, String> {
-    AFile::get_query_file_position(&params, file_id)
-        .map_err(|e| format!("Error while getting query file position: {}", e))
+    blocking(move || AFile::get_query_file_position(&params, file_id)
+        .map_err(|e| format!("Error while getting query file position: {}", e))).await
 }
 
 // collection
@@ -1217,14 +1138,14 @@ pub fn get_collection_query_file_ids(
 
 #[tauri::command]
 pub async fn get_smart_query_count_and_sum(params: SmartQueryParams) -> Result<(i64, i64), String> {
-    AFile::get_smart_query_count_and_sum(&params)
-        .map_err(|e| format!("Error while getting smart query files count: {}", e))
+    blocking(move || AFile::get_smart_query_count_and_sum(&params)
+        .map_err(|e| format!("Error while getting smart query files count: {}", e))).await
 }
 
 #[tauri::command]
 pub async fn get_smart_query_time_line(params: SmartQueryParams) -> Result<Vec<ATimeLine>, String> {
-    AFile::get_smart_query_time_line(&params)
-        .map_err(|e| format!("Error while getting smart query timeline: {}", e))
+    blocking(move || AFile::get_smart_query_time_line(&params)
+        .map_err(|e| format!("Error while getting smart query timeline: {}", e))).await
 }
 
 #[tauri::command]
@@ -1233,8 +1154,8 @@ pub async fn get_smart_query_files(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<AFile>, String> {
-    AFile::get_smart_query_files(&params, offset, limit)
-        .map_err(|e| format!("Error while getting smart query files: {}", e))
+    blocking(move || AFile::get_smart_query_files(&params, offset, limit)
+        .map_err(|e| format!("Error while getting smart query files: {}", e))).await
 }
 
 /// Get grouped render rows for a smart query.
@@ -1245,8 +1166,8 @@ pub async fn get_smart_grouped_query_rows(
     offset: i64,
     limit: i64,
 ) -> Result<GroupedQueryResult, String> {
-    AFile::get_smart_grouped_query_rows(&params, offset, limit)
-        .map_err(|e| format!("Error while getting smart grouped query rows: {}", e))
+    blocking(move || AFile::get_smart_grouped_query_rows(&params, offset, limit)
+        .map_err(|e| format!("Error while getting smart grouped query rows: {}", e))).await
 }
 
 /// Get all file ids in one group for a smart query.
@@ -1256,16 +1177,16 @@ pub async fn get_smart_group_file_ids(
     params: SmartQueryParams,
     group_id: String,
 ) -> Result<Vec<i64>, String> {
-    AFile::get_smart_group_file_ids(&params, &group_id)
-        .map_err(|e| format!("Error while getting smart group file ids: {}", e))
+    blocking(move || AFile::get_smart_group_file_ids(&params, &group_id)
+        .map_err(|e| format!("Error while getting smart group file ids: {}", e))).await
 }
 
 /// Get all file ids in the current smart query.
 /// Used by Select All to support large virtualized result sets without loading every file object.
 #[tauri::command]
 pub async fn get_smart_query_file_ids(params: SmartQueryParams) -> Result<Vec<i64>, String> {
-    AFile::get_smart_query_file_ids(&params)
-        .map_err(|e| format!("Error while getting smart query file ids: {}", e))
+    blocking(move || AFile::get_smart_query_file_ids(&params)
+        .map_err(|e| format!("Error while getting smart query file ids: {}", e))).await
 }
 
 #[tauri::command]
@@ -1273,8 +1194,8 @@ pub async fn get_smart_query_file_position(
     params: SmartQueryParams,
     file_id: i64,
 ) -> Result<Option<i64>, String> {
-    AFile::get_smart_query_file_position(&params, file_id)
-        .map_err(|e| format!("Error while getting smart query file position: {}", e))
+    blocking(move || AFile::get_smart_query_file_position(&params, file_id)
+        .map_err(|e| format!("Error while getting smart query file position: {}", e))).await
 }
 
 /// get all files from the folder
@@ -1729,39 +1650,20 @@ pub async fn import_url(
     import_url_inner(url, folder_id, folder_path).await
 }
 
-/// Import an image from the macOS drag pasteboard (for browser-sourced drags
-/// where Tauri cannot provide file paths).
-#[tauri::command]
-pub async fn import_from_drag(
-    folder_id: i64,
-    folder_path: String,
-) -> Result<Option<AFile>, String> {
-    let url = crate::t_pasteboard::get_drag_image_url()
-        .ok_or_else(|| "No image URL found in drag pasteboard".to_string())?;
-    import_url_inner(&url, folder_id, folder_path).await
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DragPayload {
-    pub file_paths: Vec<String>,
-    pub url: Option<String>,
-}
-
-#[tauri::command]
-pub fn get_drag_payload() -> DragPayload {
-    DragPayload {
-        file_paths: crate::t_pasteboard::get_drag_file_paths(),
-        url: crate::t_pasteboard::get_drag_image_url(),
-    }
-}
-
 async fn import_url_inner(
     url: &str,
     folder_id: i64,
     folder_path: String,
 ) -> Result<Option<AFile>, String> {
-    let response = reqwest::get(url)
+    const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Failed to create download client: {}", e))?;
+    let mut response = client
+        .get(url)
+        .send()
         .await
         .map_err(|e| format!("Failed to download image: {}", e))?;
 
@@ -1795,10 +1697,21 @@ async fn import_url_inner(
         .or_else(|| filename_from_url(response.url().as_str()))
         .or_else(|| filename_from_url(url));
 
-    let bytes = response
-        .bytes()
+    // Stream with a hard cap so a huge or endless body cannot exhaust memory.
+    if response.content_length().is_some_and(|len| len > MAX_IMPORT_BYTES) {
+        return Err("Image is too large to import".to_string());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| format!("Failed to read response: {}", e))?;
+        .map_err(|e| format!("Failed to read response: {}", e))?
+    {
+        if bytes.len() as u64 + chunk.len() as u64 > MAX_IMPORT_BYTES {
+            return Err("Image is too large to import".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
 
     let dest_folder = folder_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1855,7 +1768,14 @@ fn clean_import_filename(name: &str) -> Option<String> {
         .file_name()
         .and_then(|item| item.to_str())?
         .trim();
-    if filename.is_empty() || filename.contains('\0') {
+    // Server-supplied names must not carry characters NTFS rejects; ':' in
+    // particular would write to an alternate data stream ("a.jpg:evil").
+    let filename: String = filename
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
+        .collect();
+    let filename = filename.trim_end_matches(['.', ' ']);
+    if filename.is_empty() {
         None
     } else {
         Some(filename.to_string())
@@ -1868,12 +1788,17 @@ fn percent_decode_utf8(value: &str) -> String {
     let mut index = 0;
 
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                decoded.push(hex);
-                index += 3;
-                continue;
-            }
+        // Decode from bytes: slicing the &str here would panic when the two
+        // bytes after '%' split a multi-byte UTF-8 character (e.g. "%aé").
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            let hex = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+            decoded.push(hex(bytes[index + 1]) << 4 | hex(bytes[index + 2]));
+            index += 3;
+            continue;
         }
 
         decoded.push(bytes[index]);
@@ -1885,17 +1810,32 @@ fn percent_decode_utf8(value: &str) -> String {
 
 /// Import a file from raw bytes (used by DOM-based drag-drop on Windows
 /// where Tauri native file paths are unavailable).
+///
+/// The bytes arrive as a raw IPC body rather than a JSON number array (which
+/// inflated a 200 MB drop to ~1 GB of JSON); the other arguments travel as
+/// percent-encoded `x-file-name` / `x-folder-id` / `x-folder-path` headers.
 #[tauri::command]
-pub async fn import_file_bytes(
-    bytes: Vec<u8>,
-    name: String,
-    folder_id: i64,
-    folder_path: String,
-) -> Result<Option<AFile>, String> {
+pub async fn import_file_bytes(request: tauri::ipc::Request<'_>) -> Result<Option<AFile>, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected raw file bytes".to_string());
+    };
     if bytes.is_empty() {
         return Err("Dropped file is empty".to_string());
     }
-    let dest_folder = folder_path.clone();
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(percent_decode_utf8)
+            .ok_or_else(|| format!("Missing {} header", name))
+    };
+    let name = header("x-file-name")?;
+    let folder_id: i64 = header("x-folder-id")?
+        .parse()
+        .map_err(|_| "Invalid folder id".to_string())?;
+    let dest_folder = header("x-folder-path")?;
+    let bytes = bytes.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let new_path = t_utils::save_bytes_with_name(&bytes, &name, &dest_folder)
             .ok_or_else(|| "Failed to save dropped file".to_string())?;
@@ -1939,24 +1879,6 @@ fn import_clipboard_file(
 
 #[tauri::command]
 pub async fn has_importable_clipboard(_app_handle: tauri::AppHandle) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        let Ok(clipboard_data) = crate::t_pasteboard::get_clipboard_import_data(&_app_handle).await
-        else {
-            return false;
-        };
-
-        if clipboard_data.file_paths.iter().any(|path| {
-            std::path::Path::new(path).is_file() && t_utils::get_file_type(path).is_some()
-        }) {
-            return true;
-        }
-
-        if clipboard_data.png.is_some() {
-            return true;
-        }
-    }
-
     let Ok(mut clipboard) = arboard::Clipboard::new() else {
         return false;
     };
@@ -1982,57 +1904,6 @@ pub async fn import_clipboard(
     folder_id: i64,
     folder_path: &str,
 ) -> Result<Vec<AFile>, String> {
-    #[cfg(target_os = "linux")]
-    {
-        let clipboard_data = crate::t_pasteboard::get_clipboard_import_data(&_app_handle).await?;
-        if !clipboard_data.file_paths.is_empty() {
-            let mut imported = Vec::new();
-            for path in clipboard_data
-                .file_paths
-                .iter()
-                .map(std::path::Path::new)
-                .filter(|path| path.is_file())
-            {
-                let supported = path.to_str().and_then(t_utils::get_file_type).is_some();
-                if !supported {
-                    continue;
-                }
-                match import_clipboard_file(path, folder_id, folder_path) {
-                    Ok(file) => imported.push(file),
-                    Err(error) => eprintln!(
-                        "Failed to import clipboard file {}: {}",
-                        path.display(),
-                        error
-                    ),
-                }
-            }
-            if !imported.is_empty() {
-                return Ok(imported);
-            }
-        }
-
-        if let Some(png) = clipboard_data.png {
-            let new_path = t_utils::save_bytes_to_folder(&png, "image/png", folder_path)
-                .ok_or_else(|| "Failed to save clipboard image".to_string())?;
-            let file_type = t_utils::get_file_type(&new_path).ok_or_else(|| {
-                let _ = std::fs::remove_file(&new_path);
-                format!("Unsupported file type: {}", new_path)
-            })?;
-            let now = chrono::Utc::now().timestamp_millis();
-            return match AFile::add_to_db(folder_id, &new_path, file_type, now) {
-                Ok((file, _)) => Ok(vec![file]),
-                Err(error) => {
-                    let _ = std::fs::remove_file(&new_path);
-                    Err(error)
-                }
-            };
-        }
-
-        if !clipboard_data.file_paths.is_empty() {
-            return Err("Clipboard does not contain supported image files".to_string());
-        }
-    }
-
     let mut clipboard =
         arboard::Clipboard::new().map_err(|e| format!("Failed to open clipboard: {}", e))?;
     if let Ok(file_paths) = clipboard.get().file_list() {
@@ -2323,6 +2194,33 @@ pub fn clean_unused_thumbnail_cache() -> Result<t_sqlite::ThumbnailCacheCleanupR
 pub async fn get_file_thumb(
     app_handle: tauri::AppHandle,
     file_id: i64,
+    file_path: String,
+    file_type: i64,
+    orientation: i32,
+    thumbnail_size: u32,
+    raw_thumbnail_source: String,
+    force_regenerate: bool,
+    thumbnail_seek_percent: Option<u8>,
+) -> Result<Option<AThumb>, String> {
+    blocking(move || {
+        get_file_thumb_sync(
+            app_handle,
+            file_id,
+            &file_path,
+            file_type,
+            orientation,
+            thumbnail_size,
+            raw_thumbnail_source,
+            force_regenerate,
+            thumbnail_seek_percent,
+        )
+    })
+    .await
+}
+
+fn get_file_thumb_sync(
+    app_handle: tauri::AppHandle,
+    file_id: i64,
     file_path: &str,
     file_type: i64,
     orientation: i32,
@@ -2374,6 +2272,25 @@ pub async fn get_file_thumb_by_id(
     raw_thumbnail_source: String,
     force_regenerate: bool,
 ) -> Result<Option<AThumb>, String> {
+    blocking(move || {
+        get_file_thumb_by_id_sync(
+            app_handle,
+            file_id,
+            thumbnail_size,
+            raw_thumbnail_source,
+            force_regenerate,
+        )
+    })
+    .await
+}
+
+fn get_file_thumb_by_id_sync(
+    app_handle: tauri::AppHandle,
+    file_id: i64,
+    thumbnail_size: u32,
+    raw_thumbnail_source: String,
+    force_regenerate: bool,
+) -> Result<Option<AThumb>, String> {
     let Some(file) = AFile::get_file_info(file_id)
         .map_err(|e| format!("Error while getting file info for thumbnail: {}", e))?
     else {
@@ -2419,6 +2336,27 @@ pub async fn get_file_thumb_by_id(
 /// get multiple thumbnails in one IPC call; missing thumbnails are generated in background
 #[tauri::command]
 pub async fn get_file_thumbs(
+    app_handle: tauri::AppHandle,
+    files: Vec<ThumbRequest>,
+    thumbnail_size: u32,
+    raw_thumbnail_source: String,
+    force_regenerate: bool,
+    trust_cached: bool,
+) -> Result<Vec<Option<AThumb>>, String> {
+    blocking(move || {
+        get_file_thumbs_sync(
+            app_handle,
+            files,
+            thumbnail_size,
+            raw_thumbnail_source,
+            force_regenerate,
+            trust_cached,
+        )
+    })
+    .await
+}
+
+fn get_file_thumbs_sync(
     app_handle: tauri::AppHandle,
     files: Vec<ThumbRequest>,
     thumbnail_size: u32,
@@ -3249,4 +3187,26 @@ pub fn restore_databases(
     selections: Vec<t_storage::RestoreSelection>,
 ) -> Result<t_storage::RestoreResult, String> {
     t_storage::restore_databases(&backup_path, &selections)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_handles_multibyte_after_percent() {
+        // Used to panic: slicing "%aé" by bytes splits 'é'.
+        assert_eq!(percent_decode_utf8("%aé"), "%aé");
+        assert_eq!(percent_decode_utf8("caf%C3%A9.jpg"), "café.jpg");
+        assert_eq!(percent_decode_utf8("100%"), "100%");
+        assert_eq!(percent_decode_utf8("%zz"), "%zz");
+    }
+
+    #[test]
+    fn import_filename_is_safe_on_ntfs() {
+        assert_eq!(clean_import_filename("a.jpg:evil").as_deref(), Some("a.jpg_evil"));
+        assert_eq!(clean_import_filename(r"..\..\x.png").as_deref(), Some("x.png"));
+        assert_eq!(clean_import_filename("photo.jpg. ").as_deref(), Some("photo.jpg"));
+        assert_eq!(clean_import_filename("  "), None);
+    }
 }

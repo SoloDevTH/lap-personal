@@ -17,7 +17,6 @@
         :tooltip="t(config.infoPanel.mapTheme === 0 ? 'map.standard' : 'map.satellite')"
         @click="toggleMap"
       />
-      <TButton v-if="showAppleMapsButton" :icon="IconExternal" :tooltip="t('file_info.open_apple_maps')" @click="openAppleMaps" />
     </div>
     <div v-if="isQueryMap && !loading" class="absolute top-2 right-2 z-500 pointer-events-none rounded-box bg-base-100/60 px-2 py-1 text-xs text-base-content/70">
       {{ points.length > 0 ? t('map.photo_count', { count: totalCount.toLocaleString() }) : t('map.no_photos_in_view') }}
@@ -39,11 +38,10 @@ import {
   getGpsMapPoints,
   getQueryFiles,
   getSmartQueryFileIds,
-  openExternalUrl,
 } from '@/common/api'
-import { getThumbUrl, isMac } from '@/common/utils'
+import { getThumbUrl } from '@/common/utils'
 import { useUIStore } from '@/stores/uiStore'
-import { IconExternal, IconMapCenter, IconMapDefault, IconMapSatellite, IconZoomIn, IconZoomOut } from '@/common/icons'
+import { IconMapCenter, IconMapDefault, IconMapSatellite, IconZoomIn, IconZoomOut } from '@/common/icons'
 import TButton from '@/components/TButton.vue'
 
 const props = defineProps({
@@ -68,7 +66,6 @@ const zoom = ref(2)
 const singleMarker = ref(null)
 const totalCount = computed(() => points.value.reduce((sum, point) => sum + point.count, 0))
 const isQueryMap = computed(() => props.queryParams !== null)
-const showAppleMapsButton = computed(() => !isQueryMap.value && isMac && validLatLon(props.lat, props.lon))
 
 const DETAIL_ZOOM = 13
 const DETAIL_LIMIT = 500
@@ -401,11 +398,6 @@ function zoomCenter() {
 }
 function toggleMap() { config.infoPanel.mapTheme = config.infoPanel.mapTheme === 0 ? 1 : 0 }
 function validLatLon(lat, lon) { return lat != null && lon != null && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 }
-async function openAppleMaps() {
-  if (!showAppleMapsButton.value) return
-  const label = props.label.trim() || 'Lap'
-  await openExternalUrl(`maps://?ll=${props.lat},${props.lon}&q=${encodeURIComponent(label)}`)
-}
 function handleMapKeyDown(event) {
   const target = event.target
   if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable) return

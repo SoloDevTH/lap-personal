@@ -1,4 +1,4 @@
-export type ShortcutPlatform = 'mac' | 'windows' | 'linux';
+export type ShortcutPlatform = 'windows';
 
 export type ShortcutContext =
   | 'global'
@@ -109,74 +109,68 @@ export const VIEW_BACKGROUND_SHORTCUTS = [
   { actionId: 'view.backgroundWhite', value: 5 },
 ] as const satisfies ReadonlyArray<{ actionId: ShortcutActionId; value: number }>;
 
-export const DEFAULT_PLATFORM: ShortcutPlatform = (() => {
-  if (typeof navigator === 'undefined') return 'windows';
-  const platform = `${navigator.platform || ''} ${navigator.userAgent || ''}`;
-  if (/mac/i.test(platform)) return 'mac';
-  if (/linux|x11/i.test(platform)) return 'linux';
-  return 'windows';
-})();
+export const DEFAULT_PLATFORM: ShortcutPlatform = 'windows';
 
 export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: 'app.sidebar.toggle',
     contexts: ['global'],
     defaultBindings: [
-      { code: 'KeyB', modifiers: ['cmdOrCtrl'], allowShift: true, label: { mac: '⌘B', windows: 'Ctrl+B', linux: 'Ctrl+B' } },
+      { code: 'KeyB', modifiers: ['cmdOrCtrl'], allowShift: true, label: { windows: 'Ctrl+B' } },
     ],
   },
   {
     id: 'app.scale.increase',
     contexts: ['global'],
     defaultBindings: [
-      { key: '=', modifiers: ['cmdOrCtrl'], label: { mac: '⌘=', windows: 'Ctrl+=', linux: 'Ctrl+=' } },
-      { key: '+', modifiers: ['cmdOrCtrl'], allowShift: true, label: { mac: '⌘+', windows: 'Ctrl++', linux: 'Ctrl++' } },
-      { code: 'NumpadAdd', modifiers: ['cmdOrCtrl'], label: { mac: '⌘+', windows: 'Ctrl++', linux: 'Ctrl++' } },
+      { key: '=', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+=' } },
+      { key: '+', modifiers: ['cmdOrCtrl'], allowShift: true, label: { windows: 'Ctrl++' } },
+      { code: 'NumpadAdd', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl++' } },
     ],
   },
   {
     id: 'app.scale.decrease',
     contexts: ['global'],
     defaultBindings: [
-      { key: '-', modifiers: ['cmdOrCtrl'], label: { mac: '⌘-', windows: 'Ctrl+-', linux: 'Ctrl+-' } },
-      { key: '_', modifiers: ['cmdOrCtrl', 'shift'], label: { mac: '⌘-', windows: 'Ctrl+-', linux: 'Ctrl+-' } },
-      { code: 'NumpadSubtract', modifiers: ['cmdOrCtrl'], label: { mac: '⌘-', windows: 'Ctrl+-', linux: 'Ctrl+-' } },
+      { key: '-', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+-' } },
+      { key: '_', modifiers: ['cmdOrCtrl', 'shift'], label: { windows: 'Ctrl+-' } },
+      { code: 'NumpadSubtract', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+-' } },
     ],
   },
   {
     id: 'app.scale.reset',
     contexts: ['global'],
     defaultBindings: [
-      { key: '0', modifiers: ['cmdOrCtrl'], label: { mac: '⌘0', windows: 'Ctrl+0', linux: 'Ctrl+0' } },
-      { code: 'Numpad0', modifiers: ['cmdOrCtrl'], label: { mac: '⌘0', windows: 'Ctrl+0', linux: 'Ctrl+0' } },
+      { key: '0', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+0' } },
+      { code: 'Numpad0', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+0' } },
     ],
   },
   {
     id: 'app.preferences',
     contexts: ['global'],
     defaultBindings: [
-      { code: 'Comma', modifiers: ['cmdOrCtrl'], label: { mac: '⌘,', windows: 'Ctrl+,', linux: 'Ctrl+,' } },
+      { code: 'Comma', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+,' } },
     ],
   },
   {
     id: 'app.search',
     contexts: ['global'],
     defaultBindings: [
-      { code: 'Slash', modifiers: ['cmdOrCtrl'], label: { mac: '⌘/', windows: 'Ctrl+/', linux: 'Ctrl+/' } },
+      { code: 'Slash', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+/' } },
     ],
   },
   {
     id: 'file.openNewWindow',
     contexts: ['content'],
     defaultBindings: [
-      { key: 'Enter', modifiers: ['cmdOrCtrl'], allowShift: true, label: { mac: '⌘⏎', windows: 'Ctrl+Enter', linux: 'Ctrl+Enter' } },
+      { key: 'Enter', modifiers: ['cmdOrCtrl'], allowShift: true, label: { windows: 'Ctrl+Enter' } },
     ],
   },
   {
     id: 'file.openExternalApp',
     contexts: ['content'],
     defaultBindings: [
-      { code: 'KeyE', modifiers: ['cmdOrCtrl'], label: { mac: '⌘E', windows: 'Ctrl+E', linux: 'Ctrl+E' } },
+      { code: 'KeyE', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+E' } },
     ],
   },
   {
@@ -190,43 +184,42 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: 'file.copy',
     contexts: ['content'],
     defaultBindings: [
-      { code: 'KeyC', modifiers: ['cmdOrCtrl'], allowShift: true, label: { mac: '⌘C', windows: 'Ctrl+C', linux: 'Ctrl+C' } },
+      { code: 'KeyC', modifiers: ['cmdOrCtrl'], allowShift: true, label: { windows: 'Ctrl+C' } },
     ],
   },
   {
     id: 'file.paste',
     contexts: ['content', 'album-list', 'album-folder'],
     defaultBindings: [
-      { code: 'KeyV', modifiers: ['cmdOrCtrl'], label: { mac: '⌘V', windows: 'Ctrl+V', linux: 'Ctrl+V' } },
+      { code: 'KeyV', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+V' } },
     ],
   },
   {
     id: 'file.selectAll',
     contexts: ['content'],
     defaultBindings: [
-      { code: 'KeyA', modifiers: ['cmdOrCtrl'], label: { mac: '⌘A', windows: 'Ctrl+A', linux: 'Ctrl+A' } },
+      { code: 'KeyA', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+A' } },
     ],
   },
   {
     id: 'file.selectNone',
     contexts: ['content'],
     defaultBindings: [
-      { code: 'KeyD', modifiers: ['cmdOrCtrl'], label: { mac: '⌘D', windows: 'Ctrl+D', linux: 'Ctrl+D' } },
+      { code: 'KeyD', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+D' } },
     ],
   },
   {
     id: 'file.invertSelection',
     contexts: ['content'],
     defaultBindings: [
-      { code: 'KeyI', modifiers: ['cmdOrCtrl'], label: { mac: '⌘I', windows: 'Ctrl+I', linux: 'Ctrl+I' } },
+      { code: 'KeyI', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+I' } },
     ],
   },
   {
     id: 'file.rename',
     contexts: ['content'],
     defaultBindings: [
-      { key: 'Enter', platforms: ['mac'], allowShift: true, label: { mac: '⏎' } },
-      { key: 'F2', platforms: ['windows', 'linux'], allowShift: true, label: { windows: 'F2', linux: 'F2' } },
+      { key: 'F2', allowShift: true, label: { windows: 'F2' } },
     ],
   },
   {
@@ -237,21 +230,20 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: 'file.moveToFolder',
     contexts: ['content'],
-    defaultBindings: [{ code: 'KeyM', modifiers: ['cmdOrCtrl', 'shift'], label: { mac: '⇧⌘M', windows: 'Ctrl+Shift+M', linux: 'Ctrl+Shift+M' } }],
+    defaultBindings: [{ code: 'KeyM', modifiers: ['cmdOrCtrl', 'shift'], label: { windows: 'Ctrl+Shift+M' } }],
   },
   {
     id: 'file.trash',
     contexts: ['content'],
     defaultBindings: [
-      { key: 'Backspace', modifiers: ['meta'], platforms: ['mac'], allowShift: true, label: { mac: '⌘⌫' } },
-      { key: 'Delete', platforms: ['windows', 'linux'], allowShift: true, label: { windows: 'Del', linux: 'Del' } },
+      { key: 'Delete', allowShift: true, label: { windows: 'Del' } },
     ],
   },
   {
     id: 'file.reveal',
     contexts: ['content'],
     defaultBindings: [
-      { code: 'KeyR', modifiers: ['cmdOrCtrl'], label: { mac: '⌘R', windows: 'Ctrl+R', linux: 'Ctrl+R' } },
+      { code: 'KeyR', modifiers: ['cmdOrCtrl'], label: { windows: 'Ctrl+R' } },
     ],
   },
   {
@@ -332,21 +324,21 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: 'meta.rotateCounterclockwise',
     contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [{ code: 'KeyR', modifiers: ['shift'], label: { mac: '⇧R', windows: 'Shift+R', linux: 'Shift+R' } }],
+    defaultBindings: [{ code: 'KeyR', modifiers: ['shift'], label: { windows: 'Shift+R' } }],
   },
   {
     id: 'meta.info',
     contexts: ['content', 'media-viewer'],
     defaultBindings: [
       { code: 'KeyI', allowShift: true, label: 'I' },
-      { code: 'KeyI', modifiers: ['cmdOrCtrl'], allowShift: true, label: { mac: '⌘I', windows: 'Ctrl+I', linux: 'Ctrl+I' } },
+      { code: 'KeyI', modifiers: ['cmdOrCtrl'], allowShift: true, label: { windows: 'Ctrl+I' } },
     ],
   },
   {
     id: 'view.quickPreview',
     contexts: ['content'],
     defaultBindings: [
-      { key: 'Enter', platforms: ['windows', 'linux'], label: { windows: 'Enter', linux: 'Enter' } },
+      { key: 'Enter', label: { windows: 'Enter' } },
       { key: ' ', label: 'Space' },
       { key: 'Space', label: 'Space' },
     ],
@@ -370,27 +362,25 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: 'view.first',
     contexts: ['content', 'image-viewer'],
     defaultBindings: [
-      { key: 'ArrowUp', modifiers: ['meta'], platforms: ['mac'], label: { mac: '⌘↑' } },
-      { key: 'Home', platforms: ['windows', 'linux'], label: { windows: 'Home', linux: 'Home' } },
+      { key: 'Home', label: { windows: 'Home' } },
     ],
   },
   {
     id: 'view.last',
     contexts: ['content', 'image-viewer'],
     defaultBindings: [
-      { key: 'ArrowDown', modifiers: ['meta'], platforms: ['mac'], label: { mac: '⌘↓' } },
-      { key: 'End', platforms: ['windows', 'linux'], label: { windows: 'End', linux: 'End' } },
+      { key: 'End', label: { windows: 'End' } },
     ],
   },
   {
     id: 'view.pageUp',
     contexts: ['content'],
-    defaultBindings: [{ key: 'PageUp', label: { mac: 'Fn↑', windows: 'PgUp', linux: 'PgUp' } }],
+    defaultBindings: [{ key: 'PageUp', label: { windows: 'PgUp' } }],
   },
   {
     id: 'view.pageDown',
     contexts: ['content'],
-    defaultBindings: [{ key: 'PageDown', label: { mac: 'Fn↓', windows: 'PgDn', linux: 'PgDn' } }],
+    defaultBindings: [{ key: 'PageDown', label: { windows: 'PgDn' } }],
   },
   {
     id: 'view.zoomIn',
@@ -424,7 +414,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: 'view.cycleBackground',
     contexts: ['content', 'media-viewer', 'image-viewer'],
     defaultBindings: [
-      { code: 'KeyB', modifiers: ['shift'], label: { mac: '⇧B', windows: 'Shift+B', linux: 'Shift+B' } },
+      { code: 'KeyB', modifiers: ['shift'], label: { windows: 'Shift+B' } },
     ],
   },
   ...VIEW_BACKGROUND_SHORTCUTS.map(({ actionId, value }) => ({
@@ -434,7 +424,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
       {
         code: `Digit${value + 1}`,
         modifiers: ['shift'] as const,
-        label: { mac: `⇧${value + 1}`, windows: `Shift+${value + 1}`, linux: `Shift+${value + 1}` },
+        label: { windows: `Shift+${value + 1}` },
       },
     ],
   })),
@@ -450,7 +440,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
       {
         code: 'KeyP',
         modifiers: ['shift'],
-        label: { mac: '⇧P', windows: 'Shift+P', linux: 'Shift+P' },
+        label: { windows: 'Shift+P' },
       },
     ],
   },
@@ -548,7 +538,7 @@ function getBindingSignatures(
   platform: ShortcutPlatform = DEFAULT_PLATFORM,
 ): string[] {
   const modifiers = (binding.modifiers ?? []).map((modifier) =>
-    modifier === 'cmdOrCtrl' ? (platform === 'mac' ? 'meta' : 'ctrl') : modifier,
+    modifier === 'cmdOrCtrl' ? 'ctrl' : modifier,
   );
   modifiers.sort();
   const baseSignature = [...modifiers, binding.code ?? '', binding.key ?? ''].join('+');
@@ -572,8 +562,8 @@ function matchesBinding(
   if (binding.code && event.code !== binding.code) return false;
 
   const modifiers = new Set(binding.modifiers ?? []);
-  const expectsCtrl = modifiers.has('ctrl') || (modifiers.has('cmdOrCtrl') && platform !== 'mac');
-  const expectsMeta = modifiers.has('meta') || (modifiers.has('cmdOrCtrl') && platform === 'mac');
+  const expectsCtrl = modifiers.has('ctrl') || modifiers.has('cmdOrCtrl');
+  const expectsMeta = modifiers.has('meta');
 
   return Boolean(event.ctrlKey) === expectsCtrl
     && Boolean(event.metaKey) === expectsMeta

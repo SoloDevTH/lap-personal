@@ -15,7 +15,7 @@
       data-tauri-drag-region
     >
       <!-- App Icon + Title (left side, ImageViewer on Windows) -->
-      <div v-if="showDesktopWindowControls && mode === 2 && showWindowControlsBar" class="absolute left-0 top-0 h-10 flex items-center px-3 select-none" data-tauri-drag-region>
+      <div v-if="mode === 2 && showWindowControlsBar" class="absolute left-0 top-0 h-10 flex items-center px-3 select-none" data-tauri-drag-region>
         <img :src="iconLogo" class="w-5 h-5 mr-2 rounded" data-tauri-drag-region />
         <span class="text-nowrap text-sm text-base-content/70 overflow-hidden whitespace-pre text-ellipsis" data-tauri-drag-region>
           {{ $t('image_viewer.title') }}
@@ -218,7 +218,7 @@
     </div>
 
     <!-- Window Control Buttons (top-right) -->
-    <div v-if="showWindowControlsBar && showWindowControls && showDesktopWindowControls" class="absolute top-0 right-0 z-90 flex items-center" @mousedown.stop>
+    <div v-if="showWindowControlsBar && showWindowControls" class="absolute top-0 right-0 z-90 flex items-center" @mousedown.stop>
       <IconWinMinus 
         class="p-3 w-12 h-10 text-base-content/70 hover:text-base-content hover:bg-base-100 transition-colors duration-300 cursor-pointer" 
         @click.stop="minimizeWindow" 
@@ -436,7 +436,7 @@ import { useI18n } from 'vue-i18n';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { config, libConfig } from '@/common/config';
 import { useToast } from '@/common/toast';
-import { isWin, isMac, isLinux, getSlideShowInterval } from '@/common/utils';
+import { getSlideShowInterval } from '@/common/utils';
 import { getShortcutLabel, ShortcutActionId, ShortcutPlatform, VIEW_BACKGROUND_SHORTCUTS } from '@/common/shortcuts';
 import { getMotionPhotoVideoPath } from '@/common/api';
 
@@ -689,8 +689,7 @@ const filenameMaxWidth = computed(() => {
 });
 const showExtraIcons = computed(() => containerWidth.value > 600);
 // Window control state (Windows + ImageViewer mode)
-const showDesktopWindowControls = isWin || isLinux;
-const desktopAppWindow = showDesktopWindowControls ? getCurrentWindow() : null;
+const desktopAppWindow = getCurrentWindow();
 const isMaximized = ref(false);
 
 const minimizeWindow = () => desktopAppWindow?.minimize();
@@ -706,7 +705,7 @@ const toggleMaximizeWindow = () => {
   });
 };
 const closeWindow = () => desktopAppWindow?.close();
-const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
+const shortcutPlatform: ShortcutPlatform = 'windows';
 const shortcut = (actionId: ShortcutActionId) => getShortcutLabel(actionId, shortcutPlatform);
 const ratingShortcutLabel = computed(() => {
   const first = shortcut('meta.rating.clear');
@@ -914,7 +913,7 @@ const showStatusBadges = computed(() => {
 });
 
 const showWindowControlsBar = computed(() => {
-  return props.showToolbar && !(showDesktopWindowControls && props.mode === 2 && props.isFullScreen);
+  return props.showToolbar && !(props.mode === 2 && props.isFullScreen);
 });
 let resizeObserver: ResizeObserver | null = null;
 
@@ -1201,7 +1200,6 @@ const singleFileMenuItems = computed(() => {
   return useFileMenuItems(
     selectedFile,
     localeMsg,
-    isMac,
     t,
     (action) => emit('item-action', { action, index: props.fileIndex })
   ).value;

@@ -22,8 +22,6 @@ use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 use uuid::Uuid;
@@ -644,17 +642,8 @@ pub fn get_image_thumbnail(
                 match img_reader.decode() {
                     Ok(img) => img,
                     Err(e) => {
-                        // Some formats/variants (notably AVIF) may fail to decode via `image` depending on
-                        // the underlying codec support. On macOS, fall back to `sips` which supports
-                        // more system formats and returns a JPEG directly.
-                        #[cfg(target_os = "macos")]
-                        if let Ok(Some(data)) = get_thumbnail_with_sips(file_path, thumbnail_size) {
-                            return Ok(Some(data));
-                        }
-                        // On other platforms, fall back to the bundled FFmpeg sidecar when available.
-                        // This is already used for HEIC/HEIF on non-macOS and tends to support more
-                        // real-world AVIF variants than the pure-Rust decode path.
-                        #[cfg(not(target_os = "macos"))]
+                        // Fall back to the bundled FFmpeg sidecar, which handles more real-world
+                        // AVIF variants than the pure-Rust decode path.
                         {
                             if let Ok(Some(data)) = crate::t_video::get_video_thumbnail_sync(
                                 file_path,
@@ -845,11 +834,6 @@ pub fn get_raw_preview_image(
         return Ok(Some(buf));
     }
 
-    #[cfg(target_os = "macos")]
-    if let Ok(Some(data)) = get_thumbnail_with_sips(file_path, 4096) {
-        return Ok(Some(data));
-    }
-
     let orientation = get_image_orientation(file_path);
 
     // Final fallback for formats that can be decoded directly by `image`.
@@ -874,11 +858,6 @@ pub fn get_raw_dimensions(file_path: &str) -> Result<(u32, u32), String> {
     }
 
     if let Ok(Some((width, height))) = get_raw_dimensions_from_exif(file_path) {
-        return Ok((width, height));
-    }
-
-    #[cfg(target_os = "macos")]
-    if let Ok(Some((width, height))) = get_dimensions_with_sips(file_path) {
         return Ok((width, height));
     }
 
@@ -915,11 +894,6 @@ pub fn get_raw_thumbnail(
             thumbnail_size,
         )
         .map(Some);
-    }
-
-    #[cfg(target_os = "macos")]
-    if let Ok(Some(data)) = get_thumbnail_with_sips(file_path, thumbnail_size) {
-        return Ok(Some(data));
     }
 
     // Fallback for formats that can be decoded directly by `image`.
@@ -1353,19 +1327,7 @@ async fn get_generated_preview_bytes(file_path: &str) -> Result<Option<Vec<u8>>,
     }
 
     if crate::t_libraw::is_tiff_path(file_path) {
-        return match get_raw_preview_image(file_path, false) {
-            Ok(Some(data)) => Ok(Some(data)),
-            _ => {
-                #[cfg(target_os = "macos")]
-                {
-                    get_thumbnail_with_sips(file_path, 4096)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    Ok(None)
-                }
-            }
-        };
+        return Ok(get_raw_preview_image(file_path, false).ok().flatten());
     }
 
     if is_heic_path(file_path) {
@@ -1608,85 +1570,6 @@ async fn get_edited_image(params: &EditParams) -> Result<DynamicImage, String> {
     Ok(img)
 }
 
-#[cfg(target_os = "macos")]
-pub fn get_thumbnail_with_sips(
-    file_path: &str,
-    thumbnail_size: u32,
-) -> Result<Option<Vec<u8>>, String> {
-    use std::fs;
-    use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let temp_dir = std::env::temp_dir();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("System clock error: {}", e))?
-        .subsec_nanos();
-    let temp_file = temp_dir.join(format!("thumb_{}.jpg", nanos));
-    let temp_output = temp_file.to_str().ok_or("Invalid temp path")?;
-
-    let output = Command::new("sips")
-        .arg("--resampleHeight")
-        .arg(thumbnail_size.to_string())
-        .arg("-s")
-        .arg("format")
-        .arg("jpeg")
-        .arg(file_path)
-        .arg("--out")
-        .arg(temp_output)
-        .output()
-        .map_err(|e| format!("Failed to run sips: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "sips failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let data = fs::read(&temp_file).map_err(|e| format!("Failed to read temp file: {}", e))?;
-    let _ = fs::remove_file(temp_file);
-
-    Ok(Some(data))
-}
-
-#[cfg(target_os = "macos")]
-pub fn get_dimensions_with_sips(file_path: &str) -> Result<Option<(u32, u32)>, String> {
-    let output = Command::new("sips")
-        .arg("-g")
-        .arg("pixelWidth")
-        .arg("-g")
-        .arg("pixelHeight")
-        .arg(file_path)
-        .output()
-        .map_err(|e| format!("Failed to run sips for dimensions: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "sips dimension probe failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut width: Option<u32> = None;
-    let mut height: Option<u32> = None;
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        if let Some(value) = line.strip_prefix("pixelWidth:") {
-            width = value.trim().parse::<u32>().ok();
-        } else if let Some(value) = line.strip_prefix("pixelHeight:") {
-            height = value.trim().parse::<u32>().ok();
-        }
-    }
-
-    match (width, height) {
-        (Some(width), Some(height)) if width > 0 && height > 0 => Ok(Some((width, height))),
-        _ => Ok(None),
-    }
-}
-
 const FILE_IMAGE_RESULT_CACHE_MAX: usize = 8;
 
 #[derive(Clone)]
@@ -1807,9 +1690,6 @@ pub async fn get_file_image_bytes_cached(
                     file_path
                 )
             })?
-    } else if cfg!(target_os = "linux") && is_avif_path(file_path) {
-        get_image_thumbnail(file_path, get_image_orientation(file_path), 4096)?
-            .ok_or_else(|| format!("Failed to resolve AVIF preview image: {}", file_path))?
     } else if crate::t_libraw::is_tiff_path(file_path) {
         match get_raw_preview_image(file_path, false) {
             Ok(Some(data)) => data,

@@ -23,13 +23,11 @@ mod t_config;
 mod t_dedup;
 mod t_face;
 mod t_heif;
-mod t_http;
 mod t_image;
 mod t_jpeg;
 mod t_jxl;
 mod t_lens;
 mod t_libraw;
-mod t_menu;
 mod t_migration;
 mod t_motion_photo;
 mod t_pasteboard;
@@ -43,6 +41,10 @@ mod t_video;
 /// The main function is the entry point for the Tauri application.
 #[tokio::main]
 async fn main() {
+    // Share the #[tokio::main] runtime with Tauri instead of letting it spin up
+    // a second thread pool for commands and async_runtime::spawn.
+    tauri::async_runtime::set(tokio::runtime::Handle::current());
+
     std::panic::set_hook(Box::new(|panic_info| {
         eprintln!("Unhandled panic: {}", panic_info);
     }));
@@ -60,10 +62,7 @@ async fn main() {
     };
 
     let run_result = builder
-        .plugin(tauri_plugin_window_state::Builder::default().build()) // macOS: ~/Library/Application Support/{APP_NAME}/window-state.json
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -97,9 +96,7 @@ async fn main() {
         .setup(|_app| {
             t_video::init_ffmpeg_path(&_app.handle());
             t_config::set_app_identifier(&_app.config().identifier);
-            t_menu::install_app_menu(&_app.handle())?;
 
-            #[cfg(not(target_os = "macos"))]
             if let Some(window) = _app.get_webview_window("main") {
                 if let Err(e) = window.set_decorations(false) {
                     eprintln!("Failed to disable main window decorations: {}", e);
@@ -116,10 +113,6 @@ async fn main() {
             if let Err(e) = t_sqlite::create_db() {
                 eprintln!("Failed to initialize database: {}", e);
             }
-
-            // Initialize video HTTP server for Linux
-            #[cfg(target_os = "linux")]
-            t_http::init_video_http_server();
 
             // Cleanup video cache
             t_video::init_video_cache(&_app.handle());
@@ -182,38 +175,22 @@ async fn main() {
             }
 
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Prevent the default close so we can decide what to do per platform.
                 api.prevent_close();
+                let app_handle = window.app_handle();
 
-                // macOS convention: closing the window hides it; the app stays
-                // alive and can be reopened via the Dock icon (handled by
-                // RunEvent::Reopen). Real quit keeps using the native Quit menu.
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = window.hide();
-                }
-
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let app_handle = window.app_handle();
-
-                    // Close every other window first (image viewer, settings, ...),
-                    // then exit the process.
-                    let windows = app_handle.webview_windows();
-                    for (_, other_window) in windows {
-                        if other_window.label() != "main" {
-                            if let Err(err) = other_window.close() {
-                                eprintln!("Failed to close window: {}", err);
-                            }
+                // Close every other window first (image viewer, settings, ...),
+                // then exit the process.
+                let windows = app_handle.webview_windows();
+                for (_, other_window) in windows {
+                    if other_window.label() != "main" {
+                        if let Err(err) = other_window.close() {
+                            eprintln!("Failed to close window: {}", err);
                         }
                     }
-
-                    app_handle.exit(0);
                 }
+
+                app_handle.exit(0);
             }
-        })
-        .on_menu_event(|app, event| {
-            t_menu::handle_menu_event(app, event);
         })
         .invoke_handler(tauri::generate_handler![
             // library
@@ -324,8 +301,6 @@ async fn main() {
             t_cmds::import_and_organize,
             t_cmds::cancel_import_and_organize,
             t_cmds::import_url,
-            t_cmds::import_from_drag,
-            t_cmds::get_drag_payload,
             t_cmds::import_file_bytes,
             t_cmds::has_importable_clipboard,
             t_cmds::import_clipboard,
@@ -442,16 +417,6 @@ async fn main() {
                         let _ = app_handle.track_event("app_exited", None);
                     }
                     app_handle.flush_events_blocking();
-                }
-
-                // macOS: clicking the Dock icon of a running app reopens it.
-                // When the main window is hidden (closed-to-hide), show it again.
-                #[cfg(target_os = "macos")]
-                tauri::RunEvent::Reopen { .. } => {
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
                 }
                 _ => {}
             });

@@ -11,13 +11,8 @@
   >
     <!-- Title Name -->
     <!-- Icon & Title Container -->
-    <div v-if="isMac" class="flex-1" data-tauri-drag-region></div>
-    <div 
-      :class="[
-        'flex items-center overflow-hidden',
-        showDesktopWindowControls ? 'ml-2' : '',
-        isMac ? 'justify-center text-center' : ''
-      ]"
+    <div
+      class="flex items-center overflow-hidden ml-2"
       data-tauri-drag-region
     >
       <!-- Icon -->
@@ -36,20 +31,17 @@
         {{ titlebar }}
       </span>
     </div>
-    <div v-if="isMac" class="flex-1" data-tauri-drag-region></div>
 
     <!-- Center Slot -->
     <div
-      :class="[
-        isMac ? 'hidden' : 'flex-1 flex items-center justify-center'
-      ]"
+      class="flex-1 flex items-center justify-center"
       data-tauri-drag-region
     >
       <slot></slot>
     </div>
 
     <!-- Window Control Buttons -->
-    <div v-if="showDesktopWindowControls" class="h-10 mb-auto flex items-center" @mousedown.stop>
+    <div class="h-10 mb-auto flex items-center" @mousedown.stop>
       <IconWinMinus v-if="resizable" 
         class="p-3 w-12 h-full text-base-content/70 hover:text-base-content hover:bg-base-100 transition-colors duration-300" 
         @click.stop="minimizeWindow" 
@@ -73,7 +65,6 @@
 import { ref, watch } from 'vue';
 import { emit } from '@tauri-apps/api/event';
 import { getCurrentWindow  } from '@tauri-apps/api/window';
-import { isWin, isMac, isLinux } from '@/common/utils';
 
 import { 
   IconWinMinus,
@@ -105,7 +96,6 @@ const searchValue = ref('');
 
 const appWindow = getCurrentWindow();
 const isMaximized = ref(false);
-const showDesktopWindowControls = isWin || isLinux;
 
 watch(() => searchValue.value, (newValue) => { 
   console.log('searchValue:', newValue);

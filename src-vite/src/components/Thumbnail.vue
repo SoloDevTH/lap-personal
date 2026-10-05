@@ -232,7 +232,7 @@ import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config } from '@/common/config';
 import { THUMBNAIL_BADGE } from '@/common/constants';
-import { isMac, shortenFilename, formatFileSize, formatDimensionText, formatDuration, formatTimestamp, formatCaptureSettings, formatCaptureSettingValue, formatCameraInfo, getAssetSrc, getThumbUrl, getFileExtension } from '@/common/utils';
+import { shortenFilename, formatFileSize, formatDimensionText, formatDuration, formatTimestamp, formatCaptureSettings, formatCaptureSettingValue, formatCameraInfo, getAssetSrc, getThumbUrl, getFileExtension } from '@/common/utils';
 import { isWebViewVideoPlaybackDisabled } from '@/common/video';
 import { claimHoverPreview, releaseHoverPreview } from '@/common/hoverPreview';
 import ContextMenu from '@/components/ContextMenu.vue';
@@ -587,7 +587,6 @@ const localeMsg = computed(() => messages.value[locale.value] as any);
 const menuItems = useFileMenuItems(
   toRef(props, 'file'),
   localeMsg,
-  isMac,
   t,
   (action) => emit('action', action),
 );

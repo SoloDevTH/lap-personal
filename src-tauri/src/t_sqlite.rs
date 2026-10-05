@@ -47,7 +47,18 @@ fn subtree_like_pattern(path: &str) -> String {
     } else {
         format!("{}{}", prefix, separator)
     };
-    format!("{}%", prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
+    format!("{}%", escape_like(&prefix))
+}
+
+/// Escape LIKE wildcards; use with `ESCAPE '\'` in the SQL.
+fn escape_like(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+/// `%value%` with wildcards in `value` matched literally (searching "IMG_1"
+/// must not also match "IMGX1").
+fn contains_like_pattern(value: &str) -> String {
+    format!("%{}%", escape_like(value))
 }
 
 fn populate_selected_file_ids(
@@ -4509,8 +4520,8 @@ impl AFile {
         }
 
         if !params.search_file_name.is_empty() {
-            conditions.push("(a.name LIKE ? COLLATE NOCASE OR a.comments LIKE ? COLLATE NOCASE)".to_string());
-            let pattern = format!("%{}%", params.search_file_name);
+            conditions.push("(a.name LIKE ? ESCAPE '\\' OR a.comments LIKE ? ESCAPE '\\')".to_string());
+            let pattern = contains_like_pattern(&params.search_file_name);
             sql_params.push(Box::new(pattern.clone()));
             sql_params.push(Box::new(pattern));
         }
@@ -5219,12 +5230,12 @@ impl AFile {
             Self::smart_rule_string(value).ok_or_else(|| "Name value required".to_string())?;
         match operator {
             "contains" | "has" => {
-                sql_params.push(Box::new(format!("%{}%", name)));
-                Ok("a.name LIKE ? COLLATE NOCASE".to_string())
+                sql_params.push(Box::new(contains_like_pattern(&name)));
+                Ok("a.name LIKE ? ESCAPE '\\'".to_string())
             }
             "not_contains" | "not_has" => {
-                sql_params.push(Box::new(format!("%{}%", name)));
-                Ok("a.name NOT LIKE ? COLLATE NOCASE".to_string())
+                sql_params.push(Box::new(contains_like_pattern(&name)));
+                Ok("a.name NOT LIKE ? ESCAPE '\\'".to_string())
             }
             _ => Err(format!("Unsupported name operator: {}", operator)),
         }
@@ -6543,15 +6554,6 @@ impl AThumb {
             .ok()
             .flatten()
             .map(|file| {
-                #[cfg(target_os = "linux")]
-                if file
-                    .file_path
-                    .as_deref()
-                    .is_some_and(|path| path.to_ascii_lowercase().ends_with(".avif"))
-                {
-                    return false;
-                }
-
                 if file
                     .file_path
                     .as_deref()
@@ -6675,8 +6677,16 @@ impl AThumb {
         thumb_key: &str,
         extension: &str,
     ) -> Result<PathBuf, String> {
-        if thumb_key.len() < 2 {
+        if thumb_key.len() < 2 || !thumb_key.is_ascii() {
             return Err("Invalid thumbnail cache key".to_string());
+        }
+        // library_id arrives from thumb:// URLs; a value like ".." or "C:"
+        // would otherwise move the path outside the cache directory.
+        let is_safe_id = |id: &str| {
+            !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        };
+        if !is_safe_id(library_id) {
+            return Err("Invalid library id".to_string());
         }
 
         let cache_root = t_config::get_app_cache_dir()?
@@ -9852,5 +9862,17 @@ fn move_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
             fs::remove_file(src)
                 .map_err(|e| format!("Failed to remove source file '{}': {}", src.display(), e))
         }
+    }
+}
+
+#[cfg(test)]
+mod like_tests {
+    use super::*;
+
+    #[test]
+    fn like_patterns_escape_wildcards() {
+        assert_eq!(contains_like_pattern("IMG_1"), r"%IMG\_1%");
+        assert_eq!(contains_like_pattern("100%"), r"%100\%%");
+        assert_eq!(subtree_like_pattern(r"C:\a_b"), r"C:\\a\_b\\%");
     }
 }

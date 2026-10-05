@@ -720,7 +720,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          copyImages, renameFile, moveFile, moveFileOutsideLibrary, copyFile, deleteFile, deleteFilePermanently, batchDeleteFiles, editFileComment, getFileThumb, getFileThumbs, getFileInfo,
          setFileRotate, setFileFavorite, setFileRating, setFileCullingFlag, batchUpdateFileMetadata, getTagsForFile, searchSimilarImages, generateEmbedding,
          revealPath, getTagName, indexAlbum, listenIndexProgress, listenIndexFinished, setAlbumCover, setDesktopWallpaper,
-         updateFileInfo, importFile, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
+         updateFileInfo, importFile, importUrl, importFileBytes, importClipboard, addFileToDb, checkFileExists, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
          openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, setLastSelectedItemIndex,
          dedupDelete, getQueryFilePosition, getFolderSearchExcluded,
          listCollections, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile } from '@/common/api';
@@ -737,7 +737,7 @@ import { clearFolderFileCounts, setFolderFileCount } from '@/composables/useAlbu
 import { createEmptyLibraryCounts } from '@/stores/libraryStore';
 import { getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
 import { CULLING, DATE_SORT, GROUP, LIB_ITEM, RATE, SIDEBAR } from '@/common/constants';
-import { isWin, isMac, isLinux, setTheme, separator,
+import { setTheme, separator,
          formatFileSize, formatDate, getCalendarDateRange, formatFolderBreadcrumb, getThumbnailDataUrl, getAssetSrc, getPreviewUrl,
          getCachedThumbnailDataUrl,
          clearCachedThumbnailDataUrl,
@@ -1083,7 +1083,6 @@ const selectionMenuIndex = ref(-1);
 const selectionMenuItems = useFileMenuItems(
   ref<any>(null),
   localeMsg,
-  isMac,
   t,
   (action: string) => handleItemAction({ action, index: selectionMenuIndex.value }),
   {
@@ -2433,7 +2432,7 @@ const scrollbarSelectedIndex = computed(() => (
 ));
 
 const toast = useToast();
-const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
+const shortcutPlatform: ShortcutPlatform = 'windows';
 const pendingFolderSyncs = new Map<number, Promise<any>>();
 let lastSyncedAlbumFolder = '';
 const shortcut = (actionId: ShortcutActionId) => getShortcutLabel(actionId, shortcutPlatform);
@@ -2644,7 +2643,7 @@ function setPointerDropTarget(target: HTMLElement | null) {
 }
 
 function isCopyDragModifier(event: Pick<MouseEvent, 'altKey' | 'ctrlKey'>) {
-  return isMac ? event.altKey : event.ctrlKey;
+  return event.ctrlKey;
 }
 
 function updateDragGhostAction(event: Pick<MouseEvent, 'altKey' | 'ctrlKey'>) {
@@ -3462,6 +3461,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopSlideShow();
+  // Unmounting mid-drag would otherwise leave document listeners attached.
+  removeDragGhost();
+  stopDragging();
   clearRightPanelAnimationTimer();
   if (contentUpdateTimer) {
     clearTimeout(contentUpdateTimer);
@@ -4420,7 +4422,7 @@ function handleLocalKeyDown(event: KeyboardEvent) {
     return;
   }
 
-  if (!isMac && matchesShortcut('view.first', event, shortcutPlatform)) {
+  if (matchesShortcut('view.first', event, shortcutPlatform)) {
     event.preventDefault();
     checkUnsavedChanges(() => {
       selectedItemIndex.value = 0;
@@ -4428,7 +4430,7 @@ function handleLocalKeyDown(event: KeyboardEvent) {
     return;
   }
 
-  if (!isMac && matchesShortcut('view.last', event, shortcutPlatform)) {
+  if (matchesShortcut('view.last', event, shortcutPlatform)) {
     event.preventDefault();
     checkUnsavedChanges(() => {
       selectedItemIndex.value = fileList.value.length - 1;
@@ -4443,9 +4445,7 @@ function handleLocalKeyDown(event: KeyboardEvent) {
 
   const handledKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'Enter', 'Space', ' '];
 
-  if (!isMac) {
-    handleQuickPreviewShortcut(event);
-  }
+  handleQuickPreviewShortcut(event);
 
   if (handledKeys.includes(event.key)) {
     event.preventDefault();
@@ -4573,33 +4573,12 @@ const handleKeyDown = (e: any) => {
     return;
   }
 
-  // GridView prevents Space's default behavior before Content's window listener on macOS,
-  // so Quick Preview uses the App capture/global channel there.
-  if (isMac && handleQuickPreviewShortcut(event)) {
-    return;
-  }
-
   if (matchesShortcut('file.openNewWindow', event, shortcutPlatform)) {
     if (selectMode.value && selectedCount.value === 0) return;
     openImageViewer(selectedItemIndex.value, true);
-  } else if (
-    isMac &&
-    selectedItemIndex.value >= 0 &&
-    selectedItemIndex.value < fileList.value.length &&
-    fileList.value.length > 0 &&
-    matchesShortcut('file.rename', event, shortcutPlatform)
-  ) {
-    // GridView may consume Enter before Content's DOM keydown handler on macOS.
-    // Handle the shortcut in the capture/global channel as a fallback.
-    clickRename();
   } else if (matchesShortcut('file.copy', event, shortcutPlatform)) {
     if (selectMode.value && selectedCount.value === 0) return;
     void clickCopyImages(fileList.value[selectedItemIndex.value]);
-  // macOS handles Cmd+Arrow in App's capture listener before the content DOM handler.
-  } else if (isMac && matchesShortcut('view.first', event, shortcutPlatform)) {
-    keyActions.Home();
-  } else if (isMac && matchesShortcut('view.last', event, shortcutPlatform)) {
-    keyActions.End();
   } else if (matchesShortcut('file.editImage', event, shortcutPlatform)) {
     if (selectMode.value && selectedCount.value === 0) return;
     const file = fileList.value[selectedItemIndex.value];
@@ -5185,19 +5164,12 @@ onMounted( async() => {
     if (!dt) return;
     const droppedFiles = Array.from(dt.files);
     const droppedUris = getExternalDropUris(dt);
-    const nativeDragPayloadPromise = isMac
-      ? getDragPayload() as Promise<{ filePaths?: string[]; url?: string | null }>
-      : Promise.resolve(null);
     const destination = await resolveCurrentAlbumImportDestination();
     if (!destination) return;
-    const nativeDragPayload = await nativeDragPayloadPromise;
     const { albumId, folderId, folderPath } = destination;
 
     let imported = 0;
-    const filePaths = [
-      ...getExternalFileDropPaths(droppedUris),
-      ...(nativeDragPayload?.filePaths || []),
-    ];
+    const filePaths = getExternalFileDropPaths(droppedUris);
     for (const filePath of [...new Set(filePaths)]) {
       const file = await importFile(filePath, folderId, folderPath);
       if (file) imported++;
@@ -5217,8 +5189,7 @@ onMounted( async() => {
         try {
           const buf = await file.arrayBuffer();
           if (buf.byteLength === 0) continue;
-          const bytes = Array.from(new Uint8Array(buf));
-          const result = await importFileBytes(bytes, file.name, folderId, folderPath);
+          const result = await importFileBytes(buf, file.name, folderId, folderPath);
           if (result) imported++;
         } catch (err) {
           console.error('Failed to import file via bytes:', file.name, err);
@@ -5233,10 +5204,7 @@ onMounted( async() => {
       // file-like items and text/uri-list.
     }
 
-    const urls = [
-      ...getExternalHttpDropUrls(droppedUris),
-      ...(nativeDragPayload?.url ? [nativeDragPayload.url] : []),
-    ];
+    const urls = getExternalHttpDropUrls(droppedUris);
     if (urls.length > 0) {
       void handleDropUrls([...new Set(urls)], destination);
       return;
@@ -10068,13 +10036,8 @@ async function openImageViewer(
         resizable: true,
         visible: false, // Start hidden, will show after mount
         transparent: true, // Prevent white flash on show (Tauri 2.x workaround)
-        decorations: isMac,
+        decorations: false,
         zoomHotkeysEnabled: true, // Windows WebView2: needed for touchpad pinch-to-zoom
-        ...(isMac && {
-          titleBarStyle: 'overlay',
-          hiddenTitle: true,
-          minimizable: true,
-        }),
       });
 
       imageWindow.once('tauri://created', () => {
@@ -10166,12 +10129,7 @@ async function openImageEditor(index: number) {
     maximizable: false,
     visible: false,
     transparent: true,
-    decorations: isMac,
-    ...(isMac && {
-      titleBarStyle: 'overlay',
-      hiddenTitle: true,
-      minimizable: false,
-    }),
+    decorations: false,
   });
 
   newWindow.once('tauri://created', () => {

@@ -473,7 +473,6 @@ import {
   getFolderPath,
   formatFolderBreadcrumb,
   getThumbnailDataUrl,
-  isMac,
   formatTimestamp,
 } from '@/common/utils';
 import TButton from '@/components/TButton.vue';

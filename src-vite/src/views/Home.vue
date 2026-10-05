@@ -11,7 +11,7 @@
     </transition>
 
     <!-- Title Bar -->
-    <TitleBar v-if="showDesktopTitleBar" titlebar="Lap" viewName="Home" :icon="iconLogo"/>
+    <TitleBar titlebar="Lap" viewName="Home" :icon="iconLogo"/>
 
     <!-- Main Content -->
     <div class="flex-1 flex overflow-hidden">
@@ -23,7 +23,6 @@
         tabindex="-1"
         :class="[
           'relative flex my-1 ml-1 z-10 select-none outline-none',
-          !leftPanelLayoutExpanded && isMac ? 'mt-12 mb-8': '',
         ]"
         :style="{ width: leftPanelLayoutExpanded ? leftPanelWidth : '4rem' }"
         data-tauri-drag-region
@@ -152,8 +151,7 @@
       <!-- content area -->
       <div 
         :class="[
-          'flex-1 flex relative',
-          showDesktopTitleBar ? 'rounded-tl-box' : '',
+          'flex-1 flex relative rounded-tl-box',
         ]"
       >
         <Content ref="contentRef" :key="libraryVersion" :titlebar="activeSidebarButton.text" :libraryEmpty="libraryEmpty"/>
@@ -186,7 +184,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { config, libConfig } from '@/common/config';
 import { useAppUpdater } from '@/common/updater';
 import { useUIStore } from '@/stores/uiStore';
-import { isWin, isMac, isLinux, SCALE_VALUES } from '@/common/utils';
+import { SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut, ShortcutPlatform } from '@/common/shortcuts';
 import { SIDEBAR } from '@/common/constants';
 import { getAppConfig, switchLibrary, cancelIndexing, cancelFaceIndex } from '@/common/api';
@@ -325,7 +323,6 @@ const currentLibrary = computed(() =>
 
 // Manage Libraries dialog state
 const showManageLibraries = ref(false);
-const showDesktopTitleBar = isWin || isLinux;
 
 /// Splitter for resizing the left pane
 const isDraggingSplitter = ref(false);
@@ -334,11 +331,10 @@ const isDraggingCollectionSplitter = ref(false);
 const appName = ref('');
 const showDebugBadge = import.meta.env.DEV;
 let unlistenOpenPreferences: (() => void) | null = null;
-let unlistenOpenAbout: (() => void) | null = null;
 let unlistenAlbumsRefreshed: (() => void) | null = null;
 let unlistenAddAlbumRequested: (() => void) | null = null;
 let unlistenEditAlbumRequested: (() => void) | null = null;
-const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
+const shortcutPlatform: ShortcutPlatform = 'windows';
 const {
   updateAvailable,
   isCheckingUpdate,
@@ -429,9 +425,6 @@ onMounted(async () => {
   unlistenOpenPreferences = await listen('app-open-preferences', () => {
     void clickSettings();
   });
-  unlistenOpenAbout = await listen('app-open-about', () => {
-    void clickSettings(7);
-  });
 
   appConfig.value = await getAppConfig();
 
@@ -475,8 +468,6 @@ onBeforeUnmount(() => {
   document.removeEventListener('mouseup', stopDraggingCollectionSplitter);
   unlistenOpenPreferences?.();
   unlistenOpenPreferences = null;
-  unlistenOpenAbout?.();
-  unlistenOpenAbout = null;
   unlistenAlbumsRefreshed?.();
   unlistenAlbumsRefreshed = null;
   unlistenAddAlbumRequested?.();
@@ -690,13 +681,11 @@ async function clickSettings(tabIndex?: number) {
 
   if (settingsWindow) {
     try {
-      if (isWin && await settingsWindow.isMinimized()) {
+      if (await settingsWindow.isMinimized()) {
         await settingsWindow.unminimize();
       }
       await settingsWindow.show();
-      if (isWin) {
-        await settingsWindow.setFocus();
-      }
+      await settingsWindow.setFocus();
       return;
     } catch (error) {
       console.error('Failed to show existing settings window, recreating:', error);
@@ -719,12 +708,7 @@ async function clickSettings(tabIndex?: number) {
     maximizable: false,
     visible: false, // Start hidden, will show after mount
     transparent: true, // Prevent white flash on show (Tauri 2.x workaround)
-    decorations: isMac, // true for macOS, false for Windows
-    ...(isMac && {
-      titleBarStyle: 'Overlay',
-      hiddenTitle: true,
-      minimizable: false,
-    }),
+    decorations: false,
   };
 
   // create a new settings window

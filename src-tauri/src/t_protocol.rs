@@ -98,7 +98,8 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
             }
 
             let app_handle = _ctx.app_handle().clone();
-            tauri::async_runtime::spawn(async move {
+            // Blocking pool: this does SQLite queries and cache-file reads.
+            tauri::async_runtime::spawn_blocking(move || {
                 let response = match t_sqlite::AThumb::fetch_raw_for_library(file_id, &library_id) {
                     Ok(Some(data)) => image_response(data),
                     _ => {
@@ -147,26 +148,30 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
                 return;
             }
 
-            let file = match t_sqlite::AFile::get_file_info(file_id) {
-                Ok(Some(file)) => file,
-                _ => {
-                    responder.respond(text_response(http::StatusCode::NOT_FOUND, "file not found"));
-                    return;
-                }
-            };
-
-            let file_path = match file.file_path {
-                Some(path) if !path.is_empty() => path,
-                _ => {
-                    responder.respond(text_response(
-                        http::StatusCode::NOT_FOUND,
-                        "file path not found",
-                    ));
-                    return;
-                }
-            };
-
+            // Resolve the file off the protocol thread: a busy DB would
+            // otherwise stall every other preview/thumbnail request.
             tauri::async_runtime::spawn(async move {
+                let file = tauri::async_runtime::spawn_blocking(move || {
+                    t_sqlite::AFile::get_file_info(file_id)
+                })
+                .await;
+                let file_path = match file {
+                    Ok(Ok(Some(file))) => match file.file_path {
+                        Some(path) if !path.is_empty() => path,
+                        _ => {
+                            responder.respond(text_response(
+                                http::StatusCode::NOT_FOUND,
+                                "file path not found",
+                            ));
+                            return;
+                        }
+                    },
+                    _ => {
+                        responder.respond(text_response(http::StatusCode::NOT_FOUND, "file not found"));
+                        return;
+                    }
+                };
+
                 let response = match t_image::get_file_image_bytes_cached(
                     &file_path,
                     prefer_embedded_raw_preview,

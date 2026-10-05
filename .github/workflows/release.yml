@@ -6,17 +6,19 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      build_target:
-        description: 'Target to build'
+      release_tag:
+        description: "Release tag to publish to (created as a draft if missing)"
         required: true
-        default: 'all'
+        type: string
+      build_target:
+        description: "Architecture to build"
+        required: false
+        default: "all"
         type: choice
         options:
           - all
-          - aarch64-apple-darwin
-          - x86_64-apple-darwin
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
+          - x64
+          - arm64
 
 permissions:
   contents: write
@@ -28,25 +30,32 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - id: set-matrix
+        shell: bash
         run: |
-          ALL_TARGETS='[{"platform":"macos-15","target":"aarch64-apple-darwin","arch":"aarch64"},{"platform":"macos-15-intel","target":"x86_64-apple-darwin","arch":"x86_64"},{"platform":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","arch":"x86_64"},{"platform":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","arch":"aarch64"}]'
-          
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ github.event.inputs.build_target }}" != "all" ]; then
-            SELECTED_TARGET=$(echo "$ALL_TARGETS" | jq -c "[.[] | select(.target == \"${{ github.event.inputs.build_target }}\")]")
-            if [ "$SELECTED_TARGET" == "[]" ]; then
-              echo "Error: Invalid target ${{ github.event.inputs.build_target }}"
+          set -euo pipefail
+          ALL='[
+            {"arch":"x64","runner":"windows-2022","target":"x86_64-pc-windows-msvc","msvc_arch":"x64","platform_key":"windows-x86_64","artifact_name":"windows-x86_64","msi_glob":"*_x64_*.msi"},
+            {"arch":"arm64","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","msvc_arch":"arm64","platform_key":"windows-aarch64","artifact_name":"windows-aarch64","msi_glob":"*_arm64_*.msi"}
+          ]'
+
+          INPUT="${{ github.event.inputs.build_target }}"
+          if [ -z "$INPUT" ] || [ "$INPUT" = "all" ]; then
+            SEL="$ALL"
+          else
+            SEL=$(echo "$ALL" | jq -c --arg a "$INPUT" '[.[] | select(.arch == $a)]')
+            if [ "$SEL" = "[]" ]; then
+              echo "Unknown build_target: $INPUT"
               exit 1
             fi
-            MATRIX=$(echo "$SELECTED_TARGET" | jq -c '{include: .}')
-          else
-            MATRIX=$(echo "$ALL_TARGETS" | jq -c '{include: .}')
           fi
-          
+
+          MATRIX=$(echo "$SEL" | jq -c '{include: .}')
           echo "Generated matrix: $MATRIX"
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-  build:
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  build-windows:
     needs: setup
-    runs-on: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -56,17 +65,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Install system dependencies (macOS)
-        if: contains(matrix.platform, 'macos')
-        run: brew install nasm pkg-config
-
-      - name: Install system dependencies (Linux only)
-        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libjpeg-turbo8-dev \
-            nasm clang pkg-config libglib2.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev patchelf zsync
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -81,15 +79,15 @@ jobs:
       - name: Get pnpm store directory
         id: pnpm-cache
         shell: bash
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
       - name: Cache pnpm dependencies
         uses: actions/cache@v4
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          key: windows-${{ matrix.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-pnpm-store-
+            windows-${{ matrix.arch }}-pnpm-store-
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -100,59 +98,68 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            src-tauri/target/
-          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            ~\.cargo\bin\
+            ~\.cargo\registry\index\
+            ~\.cargo\registry\cache\
+            ~\.cargo\git\db\
+          key: windows-${{ matrix.arch }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.arch }}-cargo-
-
-      - name: Download FFmpeg Sidecars
-        shell: bash
-        run: bash scripts/download_ffmpeg_sidecar.sh ${{ matrix.platform }} ${{ matrix.arch }}
+            windows-${{ matrix.arch }}-cargo-release-
 
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
         working-directory: src-vite
+        run: pnpm install --frozen-lockfile
 
       - name: Cache AI Models
         id: cache-ai-models
         uses: actions/cache@v4
         with:
           path: src-tauri/resources/models
-          key: ${{ runner.os }}-models-${{ hashFiles('scripts/download_models.sh', 'scripts/download_models.ps1') }}
+          key: ${{ runner.os }}-models-${{ hashFiles('scripts/download_models.ps1') }}
 
-      - name: Download AI Models
+      - name: Download AI Models (Windows)
         if: steps.cache-ai-models.outputs.cache-hit != 'true'
-        shell: bash
+        shell: pwsh
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: bash scripts/download_models.sh
+        run: .\scripts\download_models.ps1
 
-      - name: Clear cached Linux bundle artifacts
-        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
-        shell: bash
-        run: rm -rf src-tauri/target/${{ matrix.target }}/release/bundle
+      - name: Force app frontend build command (Windows CI only)
+        shell: pwsh
+        run: |
+          $path = "src-tauri/tauri.conf.json"
+          $json = Get-Content $path -Raw | ConvertFrom-Json
+          $json.build.beforeBuildCommand = "pnpm --dir ../src-vite build || pnpm --dir src-vite build"
+          $json | ConvertTo-Json -Depth 100 | Set-Content -Path $path -Encoding utf8
 
-      - name: Build and Sign (macOS ${{ matrix.arch }})
-        if: contains(matrix.platform, 'macos')
-        uses: tauri-apps/tauri-action@v0.5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APTABASE_KEY: ${{ secrets.APTABASE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Setup MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          args: --verbose --target ${{ matrix.target }}
+          arch: ${{ matrix.msvc_arch }}
+          vsversion: "2022"
 
-      - name: Build and Sign (Linux ${{ matrix.arch }})
-        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
+      - name: Remove ranlib from PATH
+        shell: pwsh
+        run: |
+          $paths = $env:PATH -split ';' | Where-Object {
+            $_ -and
+            -not (Test-Path (Join-Path $_ 'ranlib.exe'))
+          }
+          "PATH=$($paths -join ';')" >> $env:GITHUB_ENV
+
+      - name: Clear cached Windows bundle artifacts
+        shell: pwsh
+        run: |
+          $bundleDir = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          if (Test-Path $bundleDir) {
+            Remove-Item -Recurse -Force $bundleDir
+          }
+
+      - name: Download FFmpeg Sidecars (Windows)
+        shell: pwsh
+        run: .\scripts\download_ffmpeg_sidecar.ps1 -Arch ${{ matrix.arch }}
+
+      - name: Build and Sign (Windows ${{ matrix.arch }})
         uses: tauri-apps/tauri-action@v0.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -161,221 +168,95 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
-          args: --verbose --target ${{ matrix.target }} --bundles deb,appimage
+          args: --verbose --target ${{ matrix.target }} --bundles msi
 
-      - name: Strip bundled Wayland client and add update info
-        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="$(jq -r '.version' src-tauri/tauri.conf.json)"
-          OWNER_REPO="$(echo "${{ github.repository }}" | tr '/' '|')"
-          export VERSION
-          export UPDATE_INFO="gh-releases-zsync|${OWNER_REPO}|latest|{name_star}.zsync"
-          export ZSYNC_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/{name}"
-          bash scripts/remove_appimage_wayland_client.sh \
-            src-tauri/target/${{ matrix.target }}/release/bundle/appimage
-
-      # Notarize and Staple (Sync)
-      - name: Notarize and Staple
-        if: contains(matrix.platform, 'macos')
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          echo "📦 Finding DMG for notarization (${{ matrix.arch }})..."
-          DMG_PATH=$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -n 1)
-          if [ -z "$DMG_PATH" ]; then
-            # Fallback to release folder
-            DMG_PATH=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -n 1)
-          fi
-          if [ -z "$DMG_PATH" ]; then
-            echo "❌ Error: Could not find generated DMG file."
-            exit 1
-          fi
-          echo "Found: $DMG_PATH"
-
-          echo "⏳ Submitting to Apple for notarization (waiting)..."
-          xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-
-          echo "✅ Notarization accepted. Proceeding to staple..."
-          xcrun stapler staple "$DMG_PATH"
-          echo "✅ Stapling complete."
-
-          echo "🔏 Re-signing stapled DMG..."
-           
-          # Compatible with versions that expect TAURI_KEY_PASSWORD
-          export TAURI_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}"
-           
-          npx -y @tauri-apps/cli signer sign "$DMG_PATH"
-           
-          echo "✅ Re-signing complete."
-
-      # Specific for Linux: upload .deb as artifact
-      - name: Upload Build Artifact (Linux)
-        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
+      - name: Upload Build Artifact (Windows ${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.arch }}
+          name: ${{ matrix.artifact_name }}
           path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
-            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.sig
-            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
-            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage.zsync
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi.sig
           if-no-files-found: error
 
-      # Rename .app.tar.gz to include architecture so they don't overwrite each other
-      - name: Rename macOS App Bundles
-        if: contains(matrix.platform, 'macos')
-        run: |
-          echo "Renaming macOS .app.tar.gz bundles to include architecture..."
-          for file in $(find src-tauri/target -name "*.app.tar.gz"); do
-            dir=$(dirname "$file")
-            base=$(basename "$file" .app.tar.gz)
-            if [[ "$base" == *"_${{ matrix.arch }}" ]]; then
-              echo "Skipping $file (already contains architecture suffix)"
-              continue
-            fi
-            mv "$file" "$dir/${base}_${{ matrix.arch }}.app.tar.gz"
-          done
-          for file in $(find src-tauri/target -name "*.app.tar.gz.sig"); do
-            dir=$(dirname "$file")
-            base=$(basename "$file" .app.tar.gz.sig)
-            if [[ "$base" == *"_${{ matrix.arch }}" ]]; then
-              echo "Skipping $file (already contains architecture suffix)"
-              continue
-            fi
-            mv "$file" "$dir/${base}_${{ matrix.arch }}.app.tar.gz.sig"
-          done
-
-      # Upload artifacts for the release job (macOS only)
-      - name: Upload Build Artifact (macOS)
-        if: contains(matrix.platform, 'macos')
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-${{ matrix.arch }}
-          path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
-            src-tauri/target/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
-          if-no-files-found: error
-
-  # Create release after all builds complete
-  release:
-    needs: build
+  publish-windows:
+    needs: build-windows
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
+
     steps:
-      - name: Download all artifacts
+      - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          pattern: windows-*
+          path: release-files
+          merge-multiple: true
 
-      - name: Prepare release files
-        run: |
-          mkdir -p release-files
-          find artifacts -name "*.dmg" -exec cp {} release-files/ \;
-          find artifacts -name "*.deb" -exec cp {} release-files/ \;
-          find artifacts -name "*.AppImage" -exec cp {} release-files/ \;
-          find artifacts -name "*.AppImage.zsync" -exec cp {} release-files/ \;
-          find artifacts -name "*.app.tar.gz" -exec cp {} release-files/ \;
-          find artifacts -name "*.sig" -exec cp {} release-files/ \; 2>/dev/null || true
-          ls -la release-files/
+      - name: Show release files
+        run: ls -la release-files
 
-      - name: Generate latest.json
+      - name: Create draft release if missing
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "Processing version: $VERSION"
-          
-          # Find files for each architecture
-          AARCH64_DMG=$(find release-files \( -name "*aarch64*.dmg" -o -name "*arm64*.dmg" \) | head -n 1)
-          X86_64_DMG=$(find release-files \( -name "*x86_64*.dmg" -o -name "*x64*.dmg" \) | head -n 1)
-          LINUX_X86_64_DEB=$(find release-files \( -name "*amd64*.deb" -o -name "*x86_64*.deb" \) | head -n 1)
-          LINUX_AARCH64_DEB=$(find release-files \( -name "*arm64*.deb" -o -name "*aarch64*.deb" \) | head -n 1)
-          AARCH64_APP=$(find release-files \( -name "*aarch64*.app.tar.gz" -o -name "*arm64*.app.tar.gz" \) | head -n 1)
-          X86_64_APP=$(find release-files \( -name "*x86_64*.app.tar.gz" -o -name "*x64*.app.tar.gz" \) | head -n 1)
-          
-          echo "Found artifacts:"
-          echo "  AARCH64_DMG: $AARCH64_DMG"
-          echo "  X86_64_DMG: $X86_64_DMG"
-          echo "  LINUX_X86_64_DEB: $LINUX_X86_64_DEB"
-          echo "  LINUX_AARCH64_DEB: $LINUX_AARCH64_DEB"
-          echo "  AARCH64_APP: $AARCH64_APP"
-          echo "  X86_64_APP: $X86_64_APP"
-          
-          LINUX_X86_64_DEB_NAME=$(basename "$LINUX_X86_64_DEB" 2>/dev/null || echo "")
-          LINUX_AARCH64_DEB_NAME=$(basename "$LINUX_AARCH64_DEB" 2>/dev/null || echo "")
-          AARCH64_APP_NAME=$(basename "$AARCH64_APP" 2>/dev/null || echo "")
-          X86_64_APP_NAME=$(basename "$X86_64_APP" 2>/dev/null || echo "")
-          
-          # Get signatures from .sig files (generated by tauri signer)
-          LINUX_X86_64_SIG=""
-          LINUX_AARCH64_SIG=""
-          AARCH64_APP_SIG=""
-          X86_64_APP_SIG=""
-          
-          [ -f "${LINUX_X86_64_DEB}.sig" ] && LINUX_X86_64_SIG=$(cat "${LINUX_X86_64_DEB}.sig")
-          [ -f "${LINUX_AARCH64_DEB}.sig" ] && LINUX_AARCH64_SIG=$(cat "${LINUX_AARCH64_DEB}.sig")
-          [ -f "${AARCH64_APP}.sig" ] && AARCH64_APP_SIG=$(cat "${AARCH64_APP}.sig")
-          [ -f "${X86_64_APP}.sig" ] && X86_64_APP_SIG=$(cat "${X86_64_APP}.sig")
-          
-          echo "Signatures found: "
-          echo "  LINUX_X86_64: ${#LINUX_X86_64_SIG} chars"
-          echo "  LINUX_AARCH64: ${#LINUX_AARCH64_SIG} chars"
-          echo "  AARCH64_APP: ${#AARCH64_APP_SIG} chars"
-          echo "  X86_64_APP: ${#X86_64_APP_SIG} chars"
-          
-          # Create latest.json
-          cat > release-files/latest.json <<EOF
-          {
-            "version": "${VERSION}",
-            "notes": "See the release notes on GitHub for details.",
-            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "platforms": {
-              "darwin-aarch64": {
-                "signature": "${AARCH64_APP_SIG}",
-                "url": "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${AARCH64_APP_NAME}"
-              },
-              "darwin-x86_64": {
-                "signature": "${X86_64_APP_SIG}",
-                "url": "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${X86_64_APP_NAME}"
-              },
-              "linux-x86_64": {
-                "signature": "${LINUX_X86_64_SIG}",
-                "url": "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${LINUX_X86_64_DEB_NAME}"
-              },
-              "linux-aarch64": {
-                "signature": "${LINUX_AARCH64_SIG}",
-                "url": "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${LINUX_AARCH64_DEB_NAME}"
-              }
-            }
+          if ! gh release view "$TAG" -R "$GH_REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$GH_REPO" --draft --generate-notes --title "$TAG"
+          fi
+
+      - name: Generate latest.json with Windows updater entries
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          REPO="${{ github.repository }}"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$PUB_DATE" \
+            '{version: $version, notes: "See the release notes on GitHub for details.", pub_date: $pub_date, platforms: {}}' \
+            > release-files/latest.json
+
+          # merge_entry <platform_key> <msi_glob>
+          # Tauri's MSI filename embeds the architecture: "Lap_<version>_x64_en-US.msi"
+          # or "Lap_<version>_arm64_en-US.msi", so we can separate architectures by glob.
+          merge_entry() {
+            local key="$1"
+            local glob="$2"
+
+            local msi
+            msi="$(find release-files -maxdepth 1 -type f -name "$glob" ! -name '*.sig' | head -n 1)"
+            if [ -z "${msi}" ]; then
+              echo "No MSI found matching '$glob' for $key — skipping."
+              return 0
+            fi
+
+            local sig_file="${msi}.sig"
+            if [ ! -f "$sig_file" ]; then
+              echo "Missing updater signature file for $msi ($key)."
+              exit 1
+            fi
+
+            local name sig_content tmp
+            name="$(basename "$msi")"
+            sig_content="$(cat "$sig_file")"
+            tmp="$(mktemp)"
+
+            jq \
+              --arg key "$key" \
+              --arg sig "$sig_content" \
+              --arg url "https://github.com/${REPO}/releases/download/${TAG}/${name}" \
+              '.platforms[$key] = {"signature": $sig, "url": $url}' \
+              release-files/latest.json > "$tmp"
+            mv "$tmp" release-files/latest.json
+            echo "Recorded $key -> $name"
           }
-          EOF
-          
-          echo "Generated latest.json:"
+
+          merge_entry "windows-x86_64" "*_x64_*.msi"
+          merge_entry "windows-aarch64" "*_arm64_*.msi"
+
+          echo "Final latest.json:"
           cat release-files/latest.json
 
-      - name: Remove sig files before release
-        run: |
-          find release-files -name "*.sig" -delete 2>/dev/null || true
-          echo "Final release files:"
-          ls -la release-files/
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-files/*
-          draft: true
-          prerelease: false
-          generate_release_notes: true
+      - name: Upload Windows assets to GitHub Release
+        run: gh release upload "$TAG" -R "$GH_REPO" release-files/* --clobber

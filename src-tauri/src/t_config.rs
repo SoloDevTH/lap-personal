@@ -482,8 +482,27 @@ pub fn load_app_config() -> Result<AppConfig, String> {
     load_app_config_locked()
 }
 
+/// Parsed config keyed by the file's (mtime, len). open_conn() resolves the
+/// DB path through load_app_config() on every query, so skip the read+parse
+/// while the file is unchanged. Saves invalidate it.
+static CONFIG_CACHE: Mutex<Option<(SystemTime, u64, AppConfig)>> = Mutex::new(None);
+
+fn config_file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
 fn load_app_config_locked() -> Result<AppConfig, String> {
     let config_path = get_config_file_path()?;
+
+    let stamp = config_file_stamp(&config_path);
+    if let (Some((mtime, len)), Ok(cache)) = (stamp, CONFIG_CACHE.lock()) {
+        if let Some((cached_mtime, cached_len, config)) = cache.as_ref() {
+            if *cached_mtime == mtime && *cached_len == len {
+                return Ok(config.clone());
+            }
+        }
+    }
 
     if config_path.exists() {
         // Retry briefly in case another process is atomically replacing the file.
@@ -493,7 +512,12 @@ fn load_app_config_locked() -> Result<AppConfig, String> {
                 .map_err(|e| format!("Failed to read config file: {}", e))?;
 
             match serde_json::from_str::<AppConfig>(&content) {
-                Ok(config) => return Ok(config),
+                Ok(config) => {
+                    if let (Some((mtime, len)), Ok(mut cache)) = (stamp, CONFIG_CACHE.lock()) {
+                        *cache = Some((mtime, len, config.clone()));
+                    }
+                    return Ok(config);
+                }
                 Err(parse_err) => {
                     // Handle rare corruption patterns (e.g. concatenated JSON objects)
                     if let Some(config) = parse_first_json_object::<AppConfig>(&content) {
@@ -552,6 +576,9 @@ fn save_app_config_locked(config: &AppConfig) -> Result<(), String> {
     let config_path = get_config_file_path()?;
     let content = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    if let Ok(mut cache) = CONFIG_CACHE.lock() {
+        *cache = None;
+    }
     write_atomic(&config_path, &content)
         .map_err(|e| format!("Failed to write config file: {}", e))?;
     Ok(())

@@ -1,7 +1,7 @@
 <div align="center">
   <img src="../docs/public/icon.png" alt="Lap Logo" width="120" style="border-radius: 20px">
   <h1>Lap - Gerenciador de fotos privadas locais</h1>
-  <h3>Gerenciador de fotos de desktop de código aberto para macOS, Windows e Linux.</h3>
+  <h3>Gerenciador de fotos de desktop de código aberto para Windows.</h3>
   <p>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/v/release/julyx10/lap" alt="GitHub release"></a>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/downloads/julyx10/lap/total" alt="GitHub all releases"></a>
@@ -24,16 +24,7 @@ Abra a [página de lançamentos recentes](https://github.com/julyx10/lap/release
 
 | Plataforma | Pacote | Nota |
 | :-- | :-- | :-- |
-| **macOS (Apple Silicon / Intel)** | `_aarch64.dmg` / `_x64.dmg` | Notarizado pela Apple |
 | **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | Não assinado — se o SmartScreen bloquear o download, clique em **Manter mesmo assim** |
-| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | Para distribuições baseadas em Debian (Ubuntu, Debian, Linux Mint, etc.) |
-
-### macOS com Homebrew
-
-```bash
-brew tap julyx10/lap
-brew install --cask lap
-```
 
 ## Capturas de tela
 
@@ -99,25 +90,6 @@ O Lap trabalha diretamente com suas pastas de fotos existentes. Desinstalar o La
 
 A desinstalação padrão remove o aplicativo. Para remover completamente o Lap, feche o Lap primeiro, desinstale o aplicativo e depois exclua o banco de dados local, o cache de miniaturas e os arquivos de configuração usando os comandos da sua plataforma.
 
-### macOS
-
-Se você instalou o Lap com o Homebrew:
-
-```bash
-brew uninstall --cask lap
-```
-
-Para uma instalação manual, feche o Lap e mova `Lap.app` da pasta `Applications` para a Lixeira.
-
-Para remover todos os arquivos de banco de dados, cache e configuração do Lap:
-
-```bash
-rm -rf "$HOME/Library/Application Support/com.julyx10.lap" \
-       "$HOME/Library/Caches/com.julyx10.lap" \
-       "$HOME/Library/WebKit/com.julyx10.lap"
-rm -f "$HOME/Library/Preferences/com.julyx10.lap.plist"
-```
-
 ### Windows
 
 Abra **Configurações > Aplicativos > Aplicativos instalados**, encontre **Lap** e selecione **Desinstalar**.
@@ -129,45 +101,21 @@ Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\com
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:APPDATA\com.julyx10.lap"
 ```
 
-### Linux
-
-Em distribuições baseadas em Debian, desinstale o pacote:
-
-```bash
-sudo apt remove lap
-```
-
-Depois remova todos os arquivos de banco de dados, cache e configuração do Lap:
-
-```bash
-rm -rf "$HOME/.local/share/com.julyx10.lap" \
-       "$HOME/.cache/com.julyx10.lap" \
-       "$HOME/.config/com.julyx10.lap"
-```
-
 Se você selecionou um diretório personalizado para o banco de dados nas configurações do Lap, exclua esse diretório separadamente após confirmar que ele contém apenas arquivos de banco de dados do Lap.
 
 ## Compilar a partir do código fonte
 
 Requisitos: Node.js 20+, pnpm, Rust estável.
 
-```bash
-# Dependências do sistema macOS
-xcode-select --install
-brew install nasm pkg-config autoconf automake libtool cmake
-
-# Dependências do sistema Linux
-# sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-#   patchelf nasm clang pkg-config autoconf automake libtool cmake
-
+```powershell
 # Clonar e compilar
 git clone --recursive https://github.com/julyx10/lap.git
 cd lap
 git submodule update --init --recursive
 cargo install tauri-cli --version "^2.0.0" --locked
-./scripts/download_models.sh            # Windows: .\scripts\download_models.ps1
-./scripts/download_ffmpeg_sidecar.sh    # Windows: .\scripts\download_ffmpeg_sidecar.ps1
-cd src-vite && pnpm install && cd ..
+.\scripts\download_models.ps1
+.\scripts\download_ffmpeg_sidecar.ps1
+cd src-vite; pnpm install; cd ..
 cargo tauri dev
 ```
 
@@ -179,15 +127,7 @@ O Lap suporta mais de 60 formatos de foto, RAW e vídeo.
 | :--- | :--- |
 | Imagens | JPG/JPEG/JFIF, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL, PSD, EXR, HDR/RGBE, TGA, JPEG 2000 (JP2/J2K/J2C/JPC/JPF/JPX), DDS, DPX, QOI |
 | Fotos RAW | CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, RAF, RW2, ORF, PEF, DNG, SRW, RWL, MRW, 3FR, MOS, DCR, KDC, ERF, MEF, RAW, MDC |
-| Vídeos | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX e mais. A reprodução H.264 é suportada em todas as plataformas, com processamento de compatibilidade automático quando a reprodução nativa não estiver disponível. HEVC/H.265 e VP9 são suportados nativamente no macOS. |
-
-### Notas sobre reprodução de vídeo no Linux
-
-No Linux Mint/Ubuntu/Debian, instale estes pacotes para melhor suporte à reprodução de vídeo:
-
-```bash
-sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
-```
+| Vídeos | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX e mais. A reprodução H.264 é suportada em todas as plataformas, com processamento de compatibilidade automático quando a reprodução nativa não estiver disponível. |
 
 ## Arquitetura
 

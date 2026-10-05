@@ -9,8 +9,7 @@
     "frontendDist": "../src-vite/dist"
   },
   "app": {
-    "withGlobalTauri": true,
-    "macOSPrivateApi": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "label": "main",
@@ -29,6 +28,21 @@
       "capabilities": [
         "default"
       ],
+      "csp": {
+        "default-src": "'self' ipc: http://ipc.localhost",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: asset: http://asset.localhost http://thumb.localhost https://thumb.localhost http://preview.localhost https://preview.localhost https://tile.openstreetmap.org https://server.arcgisonline.com https://*.tianditu.gov.cn",
+        "media-src": "'self' data: blob: asset: http://asset.localhost",
+        "connect-src": "'self' ipc: http://ipc.localhost asset: http://asset.localhost http://thumb.localhost https://thumb.localhost http://preview.localhost https://preview.localhost",
+        "font-src": "'self' data:",
+        "worker-src": "'self' blob:",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "frame-src": "'none'"
+      },
+      "devCsp": null,
+      "dangerousDisableAssetCspModification": ["style-src"],
       "assetProtocol": {
         "enable": true,
         "scope": [
@@ -38,11 +52,7 @@
           "$DOCUMENT/**",
           "$DESKTOP/**",
           "$DOWNLOAD/**",
-          "$APPCACHE/**",
-          "/Volumes/**",
-          "/media/**",
-          "/mnt/**",
-          "/run/media/**"
+          "$APPCACHE/**"
         ]
       }
     }
@@ -54,8 +64,7 @@
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.png",
-      "icons/icon.ico",
-      "icons/icon.icns"
+      "icons/icon.ico"
     ],
     "resources": {
       "resources/models/*": "models",

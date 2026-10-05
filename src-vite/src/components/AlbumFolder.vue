@@ -150,7 +150,7 @@ import { ref, nextTick, computed, inject, provide } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
-import { isMac, shortenFilename, isValidFileName, getFolderPath, getFullPath, normalizePathForCompare, isWithinRootPath } from '@/common/utils';
+import { shortenFilename, isValidFileName, getFolderPath, getFullPath, normalizePathForCompare, isWithinRootPath } from '@/common/utils';
 import {
   createFolder, renameFolder, fetchFolder, getAllAlbums, moveFolder, moveFolderOutsideLibrary,
   copyFolder, checkFileExists, revealPath, deleteFolder, deleteFolderPermanently, recountAlbum, selectFolder as selectFolderInDb,
@@ -393,7 +393,7 @@ const getMenuItemsForFolder = async (folder: any) => {
       ]
     },
     {
-      label: isMac ? localeMsg.value.menu.file.reveal_in_finder : localeMsg.value.menu.file.reveal_in_file_explorer,
+      label: localeMsg.value.menu.file.reveal_in_file_explorer,
       action: () => {
         revealPath(folder.path);
       }

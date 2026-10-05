@@ -52,7 +52,6 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useI18n } from 'vue-i18n';
 import { getExternalAppDisplayName } from '@/common/api';
 import { config } from '@/common/config';
-import { isMac } from '@/common/utils';
 import { IconAdd, IconTrash } from '@/common/icons';
 import ModalDialog from '@/components/ModalDialog.vue';
 import TButton from '@/components/TButton.vue';
@@ -102,12 +101,6 @@ async function selectExternalApp(kind: ExternalAppKind) {
       : localeMsg.value.settings.advanced.external_video_app,
     multiple: false,
     directory: false,
-    ...(isMac
-      ? {
-          defaultPath: '/Applications',
-          filters: [{ name: 'Applications', extensions: ['app'] }],
-        }
-      : {}),
   });
 
   if (!result || Array.isArray(result)) return;

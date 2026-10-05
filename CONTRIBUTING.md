@@ -31,7 +31,7 @@ Before opening an issue:
 
 Please include:
 
-- OS and version (macOS / Windows / Linux)
+- Windows version
 - Lap version
 - Steps to reproduce
 - Expected vs actual behavior

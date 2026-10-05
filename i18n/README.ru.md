@@ -1,7 +1,7 @@
 <div align="center">
   <img src="../docs/public/icon.png" alt="Логотип Lap" width="120" style="border-radius: 20px">
   <h1>Lap — Приватный локальный менеджер фотографий</h1>
-  <h3>Менеджер фотографий с открытым исходным кодом для macOS, Windows и Linux.</h3>
+  <h3>Менеджер фотографий с открытым исходным кодом для Windows.</h3>
   <p>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/v/release/julyx10/lap" alt="GitHub release"></a>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/downloads/julyx10/lap/total" alt="GitHub all releases"></a>
@@ -24,16 +24,7 @@ Lap — это локальный менеджер фотографий с от�
 
 | Платформа | Пакет | Примечание |
 | :-- | :-- | :-- |
-| **macOS (Apple Silicon / Intel)** | `_aarch64.dmg` / `_x64.dmg` | Заверено Apple (нотаризация) |
 | **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | Без подписи — если SmartScreen блокирует загрузку, нажмите **Все равно сохранить** |
-| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | Для дистрибутивов на базе Debian (Ubuntu, Debian, Linux Mint и т.д.) |
-
-### macOS с Homebrew
-
-```bash
-brew tap julyx10/lap
-brew install --cask lap
-```
 
 ## Скриншоты
 
@@ -99,25 +90,6 @@ Lap работает напрямую с существующими папкам
 
 Стандартное удаление убирает приложение. Чтобы полностью удалить Lap, сначала закройте Lap, удалите приложение, а затем удалите локальную базу данных, кэш миниатюр и файлы конфигурации с помощью команд для вашей платформы.
 
-### macOS
-
-Если вы установили Lap с помощью Homebrew:
-
-```bash
-brew uninstall --cask lap
-```
-
-При ручной установке закройте Lap и переместите `Lap.app` из папки `Applications` в Корзину.
-
-Чтобы удалить все файлы базы данных, кэша и конфигурации Lap:
-
-```bash
-rm -rf "$HOME/Library/Application Support/com.julyx10.lap" \
-       "$HOME/Library/Caches/com.julyx10.lap" \
-       "$HOME/Library/WebKit/com.julyx10.lap"
-rm -f "$HOME/Library/Preferences/com.julyx10.lap.plist"
-```
-
 ### Windows
 
 Откройте **Параметры > Приложения > Установленные приложения**, найдите **Lap** и выберите **Удалить**.
@@ -129,45 +101,21 @@ Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\com
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:APPDATA\com.julyx10.lap"
 ```
 
-### Linux
-
-В дистрибутивах на основе Debian удалите пакет:
-
-```bash
-sudo apt remove lap
-```
-
-Затем удалите все файлы базы данных, кэша и конфигурации Lap:
-
-```bash
-rm -rf "$HOME/.local/share/com.julyx10.lap" \
-       "$HOME/.cache/com.julyx10.lap" \
-       "$HOME/.config/com.julyx10.lap"
-```
-
 Если в настройках Lap вы выбрали пользовательский каталог для базы данных, удалите его отдельно, предварительно убедившись, что он содержит только файлы базы данных Lap.
 
 ## Сборка из исходников
 
 Требования: Node.js 20+, pnpm, Rust stable.
 
-```bash
-# Системные зависимости macOS
-xcode-select --install
-brew install nasm pkg-config autoconf automake libtool cmake
-
-# Системные зависимости Linux
-# sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-#   patchelf nasm clang pkg-config autoconf automake libtool cmake
-
+```powershell
 # Клонирование и сборка
 git clone --recursive https://github.com/julyx10/lap.git
 cd lap
 git submodule update --init --recursive
 cargo install tauri-cli --version "^2.0.0" --locked
-./scripts/download_models.sh            # Windows: .\scripts\download_models.ps1
-./scripts/download_ffmpeg_sidecar.sh    # Windows: .\scripts\download_ffmpeg_sidecar.ps1
-cd src-vite && pnpm install && cd ..
+.\scripts\download_models.ps1
+.\scripts\download_ffmpeg_sidecar.ps1
+cd src-vite; pnpm install; cd ..
 cargo tauri dev
 ```
 
@@ -179,15 +127,7 @@ Lap поддерживает более 60 форматов фото, RAW и в�
 | :--- | :--- |
 | Изображения | JPG/JPEG/JFIF, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL, PSD, EXR, HDR/RGBE, TGA, JPEG 2000 (JP2/J2K/J2C/JPC/JPF/JPX), DDS, DPX, QOI |
 | RAW-фото | CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, RAF, RW2, ORF, PEF, DNG, SRW, RWL, MRW, 3FR, MOS, DCR, KDC, ERF, MEF, RAW, MDC |
-| Видео | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX и другие. Воспроизведение H.264 поддерживается на всех платформах с автоматической обработкой совместимости, если нативное воспроизведение недоступно. HEVC/H.265 и VP9 поддерживаются нативно в macOS. |
-
-### Примечания по воспроизведению видео в Linux
-
-В Linux Mint/Ubuntu/Debian установите эти пакеты для лучшей поддержки воспроизведения видео:
-
-```bash
-sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
-```
+| Видео | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX и другие. Воспроизведение H.264 поддерживается на всех платформах с автоматической обработкой совместимости, если нативное воспроизведение недоступно. |
 
 ## Архитектура
 

@@ -730,7 +730,7 @@ import {
   cleanUnusedThumbnailCache as cleanUnusedThumbnailCacheApi,
   listenImageSearchModelDownloadProgress,
 } from '@/common/api';
-import { formatFileSize, isLinux, isMac, setTheme, SCALE_VALUES } from '@/common/utils';
+import { formatFileSize, setTheme, SCALE_VALUES } from '@/common/utils';
 import { getShortcutLabels, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
 import { useToast } from '@/common/toast';
 import { IconClose, IconRestore } from '@/common/icons';
@@ -746,7 +746,7 @@ import TButton from '@/components/TButton.vue';
 const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[config.settings.language] as any);
 const toast = useToast();
-const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
+const shortcutPlatform: ShortcutPlatform = 'windows';
 const settingsTabs = [
   'settings.general.title',
   'settings.browse.title',
@@ -1262,9 +1262,6 @@ const shortcutSections = computed(() => {
 });
 
 function getShortcutActionLabelKey(item: ShortcutDisplayItem): string {
-  if (item.actionId === 'file.reveal' && shortcutPlatform === 'mac') {
-    return 'reveal_in_finder';
-  }
   return item.labelKey;
 }
 
@@ -1283,9 +1280,6 @@ function getPreferredShortcutLabel(actionId: ShortcutActionId, labels: string[])
 
 function splitShortcutLabel(label: string): string[] {
   if (!label) return [];
-  if (shortcutPlatform === 'mac') {
-    return splitMacShortcutLabel(label);
-  }
 
   let normalized = label
     .replace(/←/g, 'Left')
@@ -1313,27 +1307,6 @@ function splitShortcutLabel(label: string): string[] {
     });
 }
 
-function splitMacShortcutLabel(label: string): string[] {
-  const modifierKeys = new Set(['⌘', '⌥', '⇧', '⌃']);
-  const keys: string[] = [];
-  let remaining = label;
-
-  while (remaining.length > 0 && modifierKeys.has(remaining[0])) {
-    keys.push(remaining[0]);
-    remaining = remaining.slice(1);
-  }
-
-  if (remaining.startsWith('Fn')) {
-    keys.push('Fn');
-    remaining = remaining.slice(2);
-  }
-
-  if (remaining.length > 0) {
-    keys.push(remaining);
-  }
-
-  return keys;
-}
 
 const onImageSearchModelChange = async (event: Event) => {
   const select = event.target as HTMLSelectElement;
