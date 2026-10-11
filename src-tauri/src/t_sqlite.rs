@@ -28,16 +28,20 @@ use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
-use tokio::sync::Semaphore;
 use walkdir::WalkDir;
 
 static THUMB_GENERATION_LOCKS: OnceLock<ThumbGenerationLocks> = OnceLock::new();
 static THUMB_BACKGROUND_TASKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-static THUMB_BACKGROUND_GENERATION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-const MAX_BACKGROUND_THUMB_GENERATIONS: usize = 4;
+/// Queued on-demand thumbnail jobs beyond this are dropped oldest-first.
+const MAX_QUEUED_THUMB_JOBS: usize = 3000;
+/// RAW / HEIC / video jobs each use several threads (LibRaw, ffmpeg), so only
+/// this many run at once.
+const MAX_HEAVY_THUMB_JOBS: usize = 4;
+/// Finished thumbnails are announced to the UI in batches this far apart.
+const THUMB_READY_BATCH_MS: u64 = 100;
 
 fn subtree_like_pattern(path: &str) -> String {
     let separator = std::path::MAIN_SEPARATOR;
@@ -92,10 +96,156 @@ fn thumb_background_tasks() -> &'static Mutex<HashSet<String>> {
     THUMB_BACKGROUND_TASKS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn thumb_background_generation_permits() -> Arc<Semaphore> {
-    THUMB_BACKGROUND_GENERATION_PERMITS
-        .get_or_init(|| Arc::new(Semaphore::new(MAX_BACKGROUND_THUMB_GENERATIONS)))
-        .clone()
+struct ThumbJob {
+    app_handle: tauri::AppHandle,
+    file_id: i64,
+    file_path: String,
+    file_type: i64,
+    orientation: i32,
+    thumbnail_size: u32,
+    prefer_embedded_raw_thumbnail: bool,
+    album_id: i64,
+    force_regenerate: bool,
+    seek_percent: Option<u8>,
+    heavy: bool,
+}
+
+#[derive(Default)]
+struct ThumbQueueState {
+    jobs: Vec<ThumbJob>,
+    heavy_running: usize,
+}
+
+struct ThumbQueue {
+    state: Mutex<ThumbQueueState>,
+    wake: Condvar,
+}
+
+/// On-demand thumbnail jobs are taken newest-first. Scrolling quickly queues
+/// thousands of requests, and oldest-first made the rows on screen wait behind
+/// rows the user had already scrolled past. Workers use every core at
+/// below-normal priority so the UI stays responsive.
+fn thumb_queue() -> &'static ThumbQueue {
+    static QUEUE: OnceLock<ThumbQueue> = OnceLock::new();
+    let mut first_use = false;
+    let queue = QUEUE.get_or_init(|| {
+        first_use = true;
+        ThumbQueue {
+            state: Mutex::new(ThumbQueueState::default()),
+            wake: Condvar::new(),
+        }
+    });
+    if first_use {
+        for index in 0..crate::t_utils::scan_worker_count() {
+            let _ = std::thread::Builder::new()
+                .name(format!("thumb-worker-{}", index))
+                .spawn(move || {
+                    crate::t_utils::run_at_background_priority(|| thumb_worker_loop(queue))
+                });
+        }
+    }
+    queue
+}
+
+fn thumb_worker_loop(queue: &'static ThumbQueue) {
+    loop {
+        let job = {
+            let mut state = queue.state.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                let heavy_full = state.heavy_running >= MAX_HEAVY_THUMB_JOBS;
+                if let Some(index) = state.jobs.iter().rposition(|job| !(heavy_full && job.heavy)) {
+                    let job = state.jobs.remove(index);
+                    if job.heavy {
+                        state.heavy_running += 1;
+                    }
+                    break job;
+                }
+                state = queue.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+        };
+        let heavy = job.heavy;
+        run_thumb_job(job);
+        if heavy {
+            let mut state = queue.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.heavy_running -= 1;
+            drop(state);
+            queue.wake.notify_all();
+        }
+    }
+}
+
+fn run_thumb_job(job: ThumbJob) {
+    let ThumbJob {
+        app_handle,
+        file_id,
+        file_path,
+        file_type,
+        orientation,
+        thumbnail_size,
+        prefer_embedded_raw_thumbnail,
+        album_id,
+        force_regenerate,
+        seek_percent,
+        ..
+    } = job;
+    let duration = if file_type == 2 {
+        AFile::get_file_info(file_id)
+            .ok()
+            .flatten()
+            .and_then(|f| f.duration.map(|d| d as u64))
+    } else {
+        None
+    };
+    let generated = panic::catch_unwind(AssertUnwindSafe(|| {
+        AThumb::get_or_create_thumb(
+            file_id,
+            &file_path,
+            file_type,
+            orientation,
+            thumbnail_size,
+            prefer_embedded_raw_thumbnail,
+            force_regenerate,
+            duration,
+            seek_percent,
+        )
+    }));
+    if matches!(generated, Ok(Ok(Some(_)))) && album_id > 0 {
+        announce_thumbnail_ready(app_handle, album_id, file_id, force_regenerate);
+    }
+    AThumb::finish_background_task(file_id, thumbnail_size);
+}
+
+static THUMB_READY_BUFFER: Mutex<Vec<(i64, i64, bool)>> = Mutex::new(Vec::new());
+
+/// Merge "thumbnail ready" events: one event per file made the UI do work per
+/// thumbnail, dozens of times a second.
+fn announce_thumbnail_ready(app_handle: tauri::AppHandle, album_id: i64, file_id: i64, invalidate: bool) {
+    let was_empty = {
+        let mut buffer = THUMB_READY_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+        buffer.push((album_id, file_id, invalidate));
+        buffer.len() == 1
+    };
+    if !was_empty {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(THUMB_READY_BATCH_MS)).await;
+        let batch = std::mem::take(&mut *THUMB_READY_BUFFER.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut grouped: HashMap<(i64, bool), Vec<i64>> = HashMap::new();
+        for (album_id, file_id, invalidate) in batch {
+            grouped.entry((album_id, invalidate)).or_default().push(file_id);
+        }
+        for ((album_id, invalidate), file_ids) in grouped {
+            let _ = app_handle.emit(
+                "thumbnail_ready",
+                serde_json::json!({
+                    "album_id": album_id,
+                    "file_ids": file_ids,
+                    "invalidate": invalidate,
+                }),
+            );
+        }
+    });
 }
 
 pub fn has_active_thumb_background_tasks() -> bool {
@@ -6305,12 +6455,15 @@ impl AFile {
             }
         }
 
-        // 4. Generate embedding
+        // 4. Generate embedding. Read the thumbnail before taking the engine
+        // lock, and release the lock before the DB write: search queries wait
+        // on this same lock.
+        let thumb = AThumb::fetch(file_id);
         let mut engine = state.0.lock().unwrap();
 
         // Optimized: Use thumbnail if available (much faster than loading original)
         // Fallback to original file if thumbnail is missing or fails to process
-        let embedding = match AThumb::fetch(file_id) {
+        let embedding = match thumb {
             Ok(Some(thumb)) if thumb.thumb_data.is_some() => {
                 let thumb_bytes = thumb.thumb_data.as_ref().unwrap();
                 match panic::catch_unwind(AssertUnwindSafe(|| {
@@ -6348,12 +6501,82 @@ impl AFile {
                 )),
             },
         }?;
+        drop(engine);
 
         // 5. Save to DB
         let _ =
             Self::update_embedding(file_id, embedding).map_err(|e| format!("DB Error: {}", e))?;
 
         Ok("Embedding generated and saved".to_string())
+    }
+
+    /// Embed several images with one vision-model run. Thumbnails are decoded
+    /// outside the engine lock; anything that cannot go through the batch
+    /// (no thumbnail, decode error, batch failure) falls back to the
+    /// one-at-a-time `generate_embedding`. Returns (file_id, has_embedding).
+    pub fn generate_embeddings_batch(
+        state: &State<t_ai::AiState>,
+        file_ids: &[i64],
+    ) -> Vec<(i64, bool)> {
+        let mut results = Vec::with_capacity(file_ids.len());
+        let mut inputs = Vec::new();
+        let mut input_ids = Vec::new();
+
+        for &file_id in file_ids {
+            let is_image = matches!(
+                Self::get_file_info(file_id).ok().flatten().and_then(|file| file.file_type),
+                Some(1 | 3)
+            );
+            if !is_image {
+                results.push((file_id, false));
+                continue;
+            }
+            if Self::get_embedding_by_id(file_id).is_ok_and(|embeds| !embeds.is_empty()) {
+                results.push((file_id, true));
+                continue;
+            }
+            let input = AThumb::fetch(file_id)
+                .ok()
+                .flatten()
+                .and_then(|thumb| thumb.thumb_data)
+                .and_then(|bytes| {
+                    panic::catch_unwind(|| t_ai::AiEngine::preprocess_bytes(&bytes))
+                        .ok()
+                        .and_then(Result::ok)
+                });
+            match input {
+                Some(input) => {
+                    inputs.push(input);
+                    input_ids.push(file_id);
+                }
+                None => results.push((file_id, Self::generate_embedding(state, file_id).is_ok())),
+            }
+        }
+
+        if input_ids.is_empty() {
+            return results;
+        }
+        let batch = {
+            let mut engine = state.0.lock().unwrap();
+            panic::catch_unwind(AssertUnwindSafe(|| engine.encode_preprocessed_batch(inputs)))
+                .unwrap_or_else(|_| Err("Embedding panic during batch inference".to_string()))
+        };
+        match batch {
+            Ok(embeddings) if embeddings.len() == input_ids.len() => {
+                for (file_id, embedding) in input_ids.into_iter().zip(embeddings) {
+                    results.push((file_id, Self::update_embedding(file_id, embedding).is_ok()));
+                }
+            }
+            other => {
+                if let Err(error) = other {
+                    eprintln!("Batch embedding failed, retrying one by one: {}", error);
+                }
+                for file_id in input_ids {
+                    results.push((file_id, Self::generate_embedding(state, file_id).is_ok()));
+                }
+            }
+        }
+        results
     }
 
     /// Update embedding for a file
@@ -7508,52 +7731,35 @@ impl AThumb {
             return;
         }
 
-        tauri::async_runtime::spawn(async move {
-            let Ok(_generation_permit) = thumb_background_generation_permits()
-                .acquire_owned()
-                .await
-            else {
-                Self::finish_background_task(file_id, thumbnail_size);
-                return;
-            };
-
-            let generated = tauri::async_runtime::spawn_blocking(move || {
-                let duration = if file_type == 2 {
-                    AFile::get_file_info(file_id)
-                        .ok()
-                        .flatten()
-                        .and_then(|f| f.duration.map(|d| d as u64))
-                } else {
-                    None
-                };
-
-                Self::get_or_create_thumb(
-                    file_id,
-                    &file_path,
-                    file_type,
-                    orientation,
-                    thumbnail_size,
-                    prefer_embedded_raw_thumbnail,
-                    force_regenerate,
-                    duration,
-                    seek_percent,
-                )
-            })
-            .await;
-
-            if matches!(generated, Ok(Ok(Some(_)))) && album_id > 0 {
-                let _ = app_handle.emit(
-                    "thumbnail_ready",
-                    serde_json::json!({
-                        "album_id": album_id,
-                        "file_ids": [file_id],
-                        "invalidate": force_regenerate,
-                    }),
-                );
+        let heavy = crate::t_utils::should_use_heavy_lane(file_type, &file_path, 0, 0, 0);
+        let queue = thumb_queue();
+        let dropped = {
+            let mut state = queue.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.jobs.push(ThumbJob {
+                app_handle,
+                file_id,
+                file_path,
+                file_type,
+                orientation,
+                thumbnail_size,
+                prefer_embedded_raw_thumbnail,
+                album_id,
+                force_regenerate,
+                seek_percent,
+                heavy,
+            });
+            // Drop the oldest requests (already scrolled past); the grid asks
+            // again if they come back into view.
+            if state.jobs.len() > MAX_QUEUED_THUMB_JOBS {
+                state.jobs.drain(..MAX_QUEUED_THUMB_JOBS / 6).collect::<Vec<_>>()
+            } else {
+                Vec::new()
             }
-
-            Self::finish_background_task(file_id, thumbnail_size);
-        });
+        };
+        for job in dropped {
+            Self::finish_background_task(job.file_id, job.thumbnail_size);
+        }
+        queue.wake.notify_one();
     }
 
     /// get or create a thumbnail

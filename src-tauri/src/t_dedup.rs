@@ -902,7 +902,8 @@ pub fn delete(request: DedupDeleteRequest) -> Result<DedupDeleteResult, String> 
     tx.commit().map_err(|e| e.to_string())?;
 
     let candidate_ids: HashSet<i64> = files_to_delete.iter().map(|file| file.file_id).collect();
-    let delete_result = crate::t_cmds::delete_files_grouped(files_to_delete, request.permanently)?;
+    let delete_result =
+        crate::t_cmds::delete_files_grouped(files_to_delete, request.permanently, &|_: usize, _: usize| {})?;
     let deleted_count = delete_result
         .deleted_file_ids
         .iter()

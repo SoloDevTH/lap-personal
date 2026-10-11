@@ -69,6 +69,67 @@ fn move_to_trash(path: &str) -> Result<(), String> {
     trash::delete(path).map_err(|error| error.to_string())
 }
 
+/// Move many paths to the Recycle Bin. The shell's recycle costs ~10 ms per
+/// file on NTFS and 50-100 ms on exFAT, so small batches run on a few threads
+/// at once (4 x 10 measured 2-3x faster than one 200-file batch on exFAT) and
+/// progress moves after every batch. Returns, per input path, whether it
+/// existed and is now gone — the same success rule as `trash_path`.
+/// `on_done` gets the number of paths handled since its last call.
+pub fn trash_paths(paths: &[&str], on_done: &(dyn Fn(usize) + Sync)) -> Vec<bool> {
+    const THREADS: usize = 4;
+    const BATCH: usize = 10;
+    let listed_before = listed_paths(paths);
+    // trash canonicalizes every path first, so a missing one would fail its
+    // whole batch: send only the paths that exist.
+    let existing: Vec<&str> = paths
+        .iter()
+        .copied()
+        .filter(|path| listed_before.contains(&path.to_lowercase()))
+        .collect();
+    on_done(paths.len() - existing.len());
+    let batches: Vec<&[&str]> = existing.chunks(BATCH).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..THREADS.min(batches.len()) {
+            scope.spawn(|| {
+                while let Some(batch) =
+                    batches.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                {
+                    let _ = trash::delete_all(batch.iter());
+                    on_done(batch.len());
+                }
+            });
+        }
+    });
+    let listed_after = listed_paths(paths);
+    paths
+        .iter()
+        .map(|path| {
+            let key = path.to_lowercase();
+            // A failed or aborted batch leaves some files behind: retry those
+            // one by one so a single locked file does not fail its neighbours.
+            listed_before.contains(&key) && (!listed_after.contains(&key) || trash_path(path).is_ok())
+        })
+        .collect()
+}
+
+/// Lower-cased paths of every entry in the parent folders of `paths`, one
+/// directory listing per folder. On exFAT (no directory index) a single-file
+/// existence check scans the whole folder, so checking photos one by one in
+/// 10k-file folders cost ~5 ms each.
+fn listed_paths(paths: &[&str]) -> HashSet<String> {
+    let parents: HashSet<&Path> = paths.iter().filter_map(|path| Path::new(path).parent()).collect();
+    let mut listed = HashSet::new();
+    for parent in parents {
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                listed.insert(entry.path().to_string_lossy().to_lowercase());
+            }
+        }
+    }
+    listed
+}
+
 pub fn delete_file_permanently(path: &str) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| {
         format!(
@@ -3315,25 +3376,59 @@ struct FileIndexOutcome {
     search_ready_immediately: bool,
 }
 
+/// Share of logical cores that library scanning (metadata reads) and
+/// thumbnail generation may each keep busy. No cap: the workers run at
+/// below-normal priority (`run_at_background_priority`), so the UI and other
+/// programs still win the scheduler.
+const SCAN_CPU_SHARE: f64 = 1.0;
+
+/// Run `work` on the current thread at below-normal priority, then restore
+/// the old priority (the blocking pool reuses its threads).
+pub(crate) fn run_at_background_priority<T>(work: impl FnOnce() -> T) -> T {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY,
+        THREAD_PRIORITY_BELOW_NORMAL,
+    };
+    struct Restore(THREAD_PRIORITY);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = SetThreadPriority(GetCurrentThread(), self.0);
+            }
+        }
+    }
+    let _restore = unsafe {
+        let thread = GetCurrentThread();
+        let previous = THREAD_PRIORITY(GetThreadPriority(thread));
+        let _ = SetThreadPriority(thread, THREAD_PRIORITY_BELOW_NORMAL);
+        Restore(previous)
+    };
+    work()
+}
+
+pub(crate) fn scan_worker_count() -> usize {
+    let logical_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    ((logical_cores as f64) * SCAN_CPU_SHARE).floor().max(2.0) as usize
+}
+
 #[derive(Clone)]
 struct ProcessingBudget {
     normal_thumb: Arc<Semaphore>,
     heavy_thumb: Arc<Semaphore>,
-    embedding: Arc<Semaphore>,
 }
 
 impl ProcessingBudget {
     fn new() -> Self {
-        let logical_cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let total_budget = ((logical_cores as f64) * 0.7).floor().max(1.0) as usize;
-        let heavy_budget = if logical_cores <= 8 { 1 } else { 2 }.min(total_budget);
+        let total_budget = scan_worker_count();
+        // Heavy files (RAW, video, huge images) each use several threads
+        // (ffmpeg, LibRaw), so they get about a quarter of the slots.
+        let heavy_budget = (total_budget / 4).clamp(1, 4);
         let normal_budget = total_budget.saturating_sub(heavy_budget).max(1);
         Self {
             normal_thumb: Arc::new(Semaphore::new(normal_budget)),
             heavy_thumb: Arc::new(Semaphore::new(heavy_budget)),
-            embedding: Arc::new(Semaphore::new(1)),
         }
     }
 }
@@ -3395,6 +3490,11 @@ struct ProgressTracker {
     last_emit_at: Option<Instant>,
     last_phase: String,
     snapshot: ProgressSnapshot,
+    // Thumbnails finished since the last emit, sent as one `thumbnail_ready`
+    // event per flush. One event per photo made the grid rescan its whole
+    // file list for every thumbnail (quadratic on 100k-photo albums).
+    ready_thumb_ids: Vec<i64>,
+    invalidated_thumb_ids: Vec<i64>,
 }
 
 impl ProgressTracker {
@@ -3428,6 +3528,16 @@ impl ProgressTracker {
             last_emit_at: None,
             last_phase: snapshot.phase().to_string(),
             snapshot,
+            ready_thumb_ids: Vec::new(),
+            invalidated_thumb_ids: Vec::new(),
+        }
+    }
+
+    fn thumbnail_ready(&mut self, file_id: i64, invalidate: bool) {
+        if invalidate {
+            self.invalidated_thumb_ids.push(file_id);
+        } else {
+            self.ready_thumb_ids.push(file_id);
         }
     }
 
@@ -3457,6 +3567,17 @@ impl ProgressTracker {
     }
 
     fn emit_now(&mut self) {
+        for (file_ids, invalidate) in [
+            (std::mem::take(&mut self.ready_thumb_ids), false),
+            (std::mem::take(&mut self.invalidated_thumb_ids), true),
+        ] {
+            if !file_ids.is_empty() {
+                let _ = self.app_handle.emit(
+                    "thumbnail_ready",
+                    ThumbnailReadyPayload { album_id: self.album_id, file_ids, invalidate },
+                );
+            }
+        }
         let payload = self.snapshot.to_payload(self.album_id);
         let _ = self.app_handle.emit("index_progress", payload);
         self.last_emit_at = Some(Instant::now());
@@ -3472,7 +3593,7 @@ where
     update(&mut guard)
 }
 
-fn should_use_heavy_lane(
+pub(crate) fn should_use_heavy_lane(
     file_type: i64,
     file_path: &str,
     file_size: u64,
@@ -3506,8 +3627,7 @@ fn should_use_heavy_lane(
 }
 
 fn index_single_file(
-    album_path: &str,
-    album_id: i64,
+    folder_id: i64,
     path_str: &str,
     ftype: i64,
     thumbnail_size: u32,
@@ -3515,76 +3635,64 @@ fn index_single_file(
     last_scan_time: i64,
 ) -> Option<FileIndexOutcome> {
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let parent_path = Path::new(path_str)
-            .parent()
-            .unwrap_or(Path::new(album_path))
-            .to_string_lossy()
-            .to_string();
+        if let Ok((file, _)) =
+            crate::t_sqlite::AFile::add_to_db(folder_id, path_str, ftype, last_scan_time)
+        {
+            if let Some(file_id) = file.id {
+                let has_thumbnail = file.has_thumbnail.unwrap_or(false);
+                let needs_thumbnail_regeneration = has_thumbnail
+                    && crate::t_sqlite::AThumb::needs_thumbnail_regeneration(
+                        file_id,
+                        thumbnail_size,
+                        prefer_embedded_raw_thumbnail,
+                    );
+                let thumbnail_ready = has_thumbnail && !needs_thumbnail_regeneration;
+                let has_embedding = file.has_embedding.unwrap_or(false);
+                let processed_immediately = thumbnail_ready;
+                let search_ready_immediately = match ftype {
+                    1 | 3 => thumbnail_ready && has_embedding,
+                    _ => false,
+                };
+                let fully_indexed = match ftype {
+                    1 | 3 => search_ready_immediately,
+                    2 => processed_immediately,
+                    _ => false,
+                };
 
-        if let Ok(folder) = crate::t_sqlite::AFolder::add_to_db(album_id, &parent_path) {
-            if let Some(folder_id) = folder.id {
-                if let Ok((file, _)) =
-                    crate::t_sqlite::AFile::add_to_db(folder_id, path_str, ftype, last_scan_time)
-                {
-                    if let Some(file_id) = file.id {
-                        let has_thumbnail = file.has_thumbnail.unwrap_or(false);
-                        let needs_thumbnail_regeneration = has_thumbnail
-                            && crate::t_sqlite::AThumb::needs_thumbnail_regeneration(
-                                file_id,
-                                thumbnail_size,
-                                prefer_embedded_raw_thumbnail,
-                            );
-                        let thumbnail_ready = has_thumbnail && !needs_thumbnail_regeneration;
-                        let has_embedding = file.has_embedding.unwrap_or(false);
-                        let processed_immediately = thumbnail_ready;
-                        let search_ready_immediately = match ftype {
-                            1 | 3 => thumbnail_ready && has_embedding,
-                            _ => false,
-                        };
-                        let fully_indexed = match ftype {
-                            1 | 3 => search_ready_immediately,
-                            2 => processed_immediately,
-                            _ => false,
-                        };
+                let task = if fully_indexed {
+                    None
+                } else {
+                    Some(ThumbnailTask {
+                        file_id,
+                        file_path: path_str.to_string(),
+                        file_type: ftype,
+                        orientation: file.e_orientation.unwrap_or(1) as i32,
+                        thumbnail_size,
+                        prefer_embedded_raw_thumbnail,
+                        file_size: file.size.max(0) as u64,
+                        duration: file.duration.map(|d| d as u64),
+                        is_heavy: should_use_heavy_lane(
+                            ftype,
+                            path_str,
+                            file.size.max(0) as u64,
+                            file.width.unwrap_or(0),
+                            file.height.unwrap_or(0),
+                        ),
+                        processed_already_ready: thumbnail_ready,
+                        force_regenerate: needs_thumbnail_regeneration,
+                    })
+                };
 
-                        let task = if fully_indexed {
-                            None
-                        } else {
-                            Some(ThumbnailTask {
-                                file_id,
-                                file_path: path_str.to_string(),
-                                file_type: ftype,
-                                orientation: file.e_orientation.unwrap_or(1) as i32,
-                                thumbnail_size,
-                                prefer_embedded_raw_thumbnail,
-                                file_size: file.size.max(0) as u64,
-                                duration: file.duration.map(|d| d as u64),
-                                is_heavy: should_use_heavy_lane(
-                                    ftype,
-                                    path_str,
-                                    file.size.max(0) as u64,
-                                    file.width.unwrap_or(0),
-                                    file.height.unwrap_or(0),
-                                ),
-                                processed_already_ready: thumbnail_ready,
-                                force_regenerate: needs_thumbnail_regeneration,
-                            })
-                        };
-
-                        return Some(FileIndexOutcome {
-                            task,
-                            processed_immediately,
-                            search_ready_immediately,
-                        });
-                    } else {
-                        eprintln!(
-                            "Indexed file has no id, skipping follow-up tasks: {}",
-                            path_str
-                        );
-                    }
-                }
+                return Some(FileIndexOutcome {
+                    task,
+                    processed_immediately,
+                    search_ready_immediately,
+                });
             } else {
-                eprintln!("Indexed folder has no id, skipping file: {}", parent_path);
+                eprintln!(
+                    "Indexed file has no id, skipping follow-up tasks: {}",
+                    path_str
+                );
             }
         }
         None
@@ -3600,10 +3708,10 @@ fn index_single_file(
 }
 
 async fn process_thumbnail_task(
-    app_handle: tauri::AppHandle,
     task: ThumbnailTask,
     budget: ProcessingBudget,
     tracker: Arc<Mutex<ProgressTracker>>,
+    embed_tx: tokio::sync::mpsc::UnboundedSender<i64>,
 ) -> Result<bool, String> {
     let thumb_semaphore = if task.is_heavy {
         budget.heavy_thumb.clone()
@@ -3618,17 +3726,19 @@ async fn process_thumbnail_task(
 
     let task_for_thumb = task.clone();
     let thumb_ok = tauri::async_runtime::spawn_blocking(move || {
-        match crate::t_sqlite::AThumb::get_or_create_thumb(
-            task_for_thumb.file_id,
-            &task_for_thumb.file_path,
-            task_for_thumb.file_type,
-            task_for_thumb.orientation,
-            task_for_thumb.thumbnail_size,
-            task_for_thumb.prefer_embedded_raw_thumbnail,
-            task_for_thumb.force_regenerate,
-            task_for_thumb.duration,
-            None,
-        ) {
+        match run_at_background_priority(|| {
+            crate::t_sqlite::AThumb::get_or_create_thumb(
+                task_for_thumb.file_id,
+                &task_for_thumb.file_path,
+                task_for_thumb.file_type,
+                task_for_thumb.orientation,
+                task_for_thumb.thumbnail_size,
+                task_for_thumb.prefer_embedded_raw_thumbnail,
+                task_for_thumb.force_regenerate,
+                task_for_thumb.duration,
+                None,
+            )
+        }) {
             Ok(Some(thumb)) if thumb.error_code == 0 => true,
             Ok(Some(_)) => false,
             Ok(None) => false,
@@ -3650,61 +3760,67 @@ async fn process_thumbnail_task(
         return Ok(false);
     }
 
-    let _ = app_handle.emit(
-        "thumbnail_ready",
-        ThumbnailReadyPayload {
-            album_id: with_progress_tracker(&tracker, |tracker| tracker.album_id),
-            file_ids: vec![task.file_id],
-            invalidate: task.force_regenerate,
-        },
-    );
-
-    if !task.processed_already_ready {
-        with_progress_tracker(&tracker, |tracker| {
+    with_progress_tracker(&tracker, |tracker| {
+        tracker.thumbnail_ready(task.file_id, task.force_regenerate);
+        if !task.processed_already_ready {
             tracker.modify(|snapshot| {
                 snapshot.processed += 1;
             });
-            tracker.maybe_emit();
-        });
+        }
+        tracker.maybe_emit();
+    });
+
+    // Free the thumbnail slot before queueing for the single embedding slot.
+    // Holding it while waiting let every thumbnail worker park behind AI
+    // embedding, so previews were produced at embedding speed, one at a time.
+    drop(_thumb_permit);
+
+    // Images go to the batching embedding worker (see run_embedding_worker);
+    // search_ready is counted there once each embedding is saved.
+    if matches!(task.file_type, 1 | 3) {
+        let _ = embed_tx.send(task.file_id);
     }
+    Ok(true)
+}
 
-    if !matches!(task.file_type, 1 | 3) {
-        return Ok(true);
-    }
-
-    let _embedding_permit = budget
-        .embedding
-        .acquire()
-        .await
-        .map_err(|e| format!("Failed to acquire embedding permit: {}", e))?;
-
-    let app_handle_for_embedding = app_handle.clone();
-    let file_id = task.file_id;
-    let file_path = task.file_path.clone();
-    let embedding_ok = tauri::async_runtime::spawn_blocking(move || {
-        let ai_state: State<crate::t_ai::AiState> = app_handle_for_embedding.state();
-        match crate::t_sqlite::AFile::generate_embedding(&ai_state, file_id) {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!("Failed to generate embedding for {}: {}", file_path, e);
-                false
+/// Embed queued images in batches of up to `BATCH`, waiting at most
+/// `FILL_WAIT` for a batch to fill so the model always runs on a full batch
+/// while thumbnails are streaming in. Ends when every sender is dropped or
+/// the scan is cancelled.
+async fn run_embedding_worker(
+    app_handle: tauri::AppHandle,
+    mut embed_rx: tokio::sync::mpsc::UnboundedReceiver<i64>,
+    tracker: Arc<Mutex<ProgressTracker>>,
+    cancellation_token: Arc<Mutex<HashMap<i64, bool>>>,
+    album_id: i64,
+) {
+    const BATCH: usize = 8;
+    const FILL_WAIT: Duration = Duration::from_millis(100);
+    while let Some(first) = embed_rx.recv().await {
+        if cancellation_token.lock().unwrap().get(&album_id) == Some(&true) {
+            break;
+        }
+        let mut file_ids = vec![first];
+        let deadline = tokio::time::Instant::now() + FILL_WAIT;
+        while file_ids.len() < BATCH {
+            match tokio::time::timeout_at(deadline, embed_rx.recv()).await {
+                Ok(Some(file_id)) => file_ids.push(file_id),
+                _ => break,
             }
         }
-    })
-    .await
-    .map_err(|e| format!("Embedding task failed: {}", e))?;
-
-    if embedding_ok {
+        let app_handle = app_handle.clone();
+        let results = tauri::async_runtime::spawn_blocking(move || {
+            let ai_state: State<crate::t_ai::AiState> = app_handle.state();
+            crate::t_sqlite::AFile::generate_embeddings_batch(&ai_state, &file_ids)
+        })
+        .await
+        .unwrap_or_default();
+        // Embedding is supplementary; failed files stay indexed and visible.
+        let ready = results.iter().filter(|(_, ok)| *ok).count() as u64;
         with_progress_tracker(&tracker, |tracker| {
-            tracker.modify(|snapshot| {
-                snapshot.search_ready += 1;
-            });
+            tracker.modify(|snapshot| snapshot.search_ready += ready);
             tracker.maybe_emit();
         });
-        Ok(true)
-    } else {
-        // Embedding is supplementary; the file remains indexed and visible.
-        Ok(false)
     }
 }
 
@@ -3792,6 +3908,16 @@ pub async fn index_album_worker(
     let mut folder_subfolder_states: Vec<FolderSubfolderState> = Vec::new();
     let mut directory_state_stack: Vec<usize> = Vec::new();
     let mut thumbnail_join_set: JoinSet<Result<bool, String>> = JoinSet::new();
+    let mut folder_ids: HashMap<String, i64> = HashMap::new();
+    let (embed_tx, embed_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+    let embedding_worker = tauri::async_runtime::spawn(run_embedding_worker(
+        app_handle.clone(),
+        embed_rx,
+        tracker.clone(),
+        cancellation_token.clone(),
+        album_id,
+    ));
+    let metadata_slots = Arc::new(Semaphore::new(scan_worker_count()));
     for entry in WalkDir::new(&album.path)
         .into_iter()
         .filter_entry(is_visible_or_root)
@@ -3853,9 +3979,6 @@ pub async fn index_album_worker(
                     continue;
                 }
 
-                // Persist current file pointer for post-crash diagnosis.
-                write_index_trace(album_id, &path_str);
-
                 if skip_file_path.as_deref() == Some(path_str.as_str()) {
                     eprintln!(
                         "Skipping suspected problematic file during recovered indexing: {}",
@@ -3875,15 +3998,82 @@ pub async fn index_album_worker(
                     continue;
                 }
 
-                if let Some(outcome) = index_single_file(
-                    &album.path,
-                    album_id,
-                    &path_str,
-                    ftype,
-                    thumbnail_size,
-                    prefer_embedded_raw_thumbnail,
-                    current_scan_time,
-                ) {
+                // Resolve each folder once per scan. AFolder::add_to_db also
+                // rewrites the folder inode, so calling it per file cost a DB
+                // write for every photo.
+                let parent_path = Path::new(&path_str)
+                    .parent()
+                    .unwrap_or(Path::new(&album.path))
+                    .to_string_lossy()
+                    .to_string();
+                let folder_id = match folder_ids.get(&parent_path) {
+                    Some(folder_id) => Some(*folder_id),
+                    None => {
+                        let folder_id =
+                            AFolder::add_to_db(album_id, &parent_path).ok().and_then(|f| f.id);
+                        if let Some(folder_id) = folder_id {
+                            folder_ids.insert(parent_path.clone(), folder_id);
+                        }
+                        folder_id
+                    }
+                };
+
+                // Read metadata (EXIF, dimensions, ffprobe for video, RAW headers)
+                // for several files at once instead of one by one; the permit
+                // keeps the directory walk only a few files ahead.
+                let metadata_permit = metadata_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| format!("Failed to acquire metadata permit: {}", e))?;
+                let budget = processing_budget.clone();
+                let tracker = tracker.clone();
+                let embed_tx = embed_tx.clone();
+                thumbnail_join_set.spawn(async move {
+                    let outcome = match folder_id {
+                        Some(folder_id) => {
+                            let path_for_metadata = path_str.clone();
+                            tauri::async_runtime::spawn_blocking(move || {
+                                // Persist current file pointer for post-crash diagnosis.
+                                // ponytail: with parallel metadata this names one of the
+                                // files in flight, not necessarily the one that crashed.
+                                write_index_trace(album_id, &path_for_metadata);
+                                run_at_background_priority(|| {
+                                    index_single_file(
+                                        folder_id,
+                                        &path_for_metadata,
+                                        ftype,
+                                        thumbnail_size,
+                                        prefer_embedded_raw_thumbnail,
+                                        current_scan_time,
+                                    )
+                                })
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                        }
+                        None => {
+                            eprintln!("Indexed folder has no id, skipping file: {}", path_str);
+                            None
+                        }
+                    };
+                    drop(metadata_permit);
+
+                    let Some(outcome) = outcome else {
+                        let file_size = std::fs::metadata(&path_str).map(|m| m.len()).unwrap_or(0);
+                        with_progress_tracker(&tracker, |tracker| {
+                            tracker.modify(|snapshot| {
+                                snapshot.discovered += 1;
+                                snapshot.failed += 1;
+                                snapshot.failed_size += file_size;
+                                snapshot.current_size += file_size;
+                            });
+                            tracker.maybe_emit();
+                        });
+                        return Ok(false);
+                    };
+
                     let file_size = outcome
                         .task
                         .as_ref()
@@ -3891,14 +4081,6 @@ pub async fn index_album_worker(
                         .unwrap_or_else(|| {
                             std::fs::metadata(&path_str).map(|m| m.len()).unwrap_or(0)
                         });
-                    if let Some(task) = outcome.task {
-                        thumbnail_join_set.spawn(process_thumbnail_task(
-                            app_handle.clone(),
-                            task,
-                            processing_budget.clone(),
-                            tracker.clone(),
-                        ));
-                    }
                     with_progress_tracker(&tracker, |tracker| {
                         tracker.modify(|snapshot| {
                             snapshot.discovered += 1;
@@ -3919,18 +4101,12 @@ pub async fn index_album_worker(
                     if discovered_now % 50 == 0 || processed_now % 50 == 0 {
                         let _ = Album::update_progress(album_id, processed_now, total_files);
                     }
-                } else {
-                    let file_size = std::fs::metadata(&path_str).map(|m| m.len()).unwrap_or(0);
-                    with_progress_tracker(&tracker, |tracker| {
-                        tracker.modify(|snapshot| {
-                            snapshot.discovered += 1;
-                            snapshot.failed += 1;
-                            snapshot.failed_size += file_size;
-                            snapshot.current_size += file_size;
-                        });
-                        tracker.maybe_emit();
-                    });
-                }
+
+                    match outcome.task {
+                        Some(task) => process_thumbnail_task(task, budget, tracker, embed_tx).await,
+                        None => Ok(true),
+                    }
+                });
 
                 traversed_count += 1;
             } else if !is_ignored_scan_sidecar(entry.path()) {
@@ -3960,6 +4136,10 @@ pub async fn index_album_worker(
             }
         }
     }
+    // Every thumbnail task (and its sender clone) is done: close the queue and
+    // let the embedding worker finish the last batches.
+    drop(embed_tx);
+    let _ = embedding_worker.await;
 
     with_progress_tracker(&tracker, |tracker| tracker.emit_now());
     let mut final_snapshot = with_progress_tracker(&tracker, |tracker| tracker.snapshot());
@@ -4101,4 +4281,36 @@ pub async fn index_album_worker(
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trash_paths;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Puts 25 small files in the Recycle Bin, so run on demand:
+    // cargo test trash_paths -- --ignored
+    #[test]
+    #[ignore]
+    fn trash_paths_reports_every_path() {
+        let dir = std::env::temp_dir().join("lap-trash-paths-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut paths: Vec<String> = (0..25)
+            .map(|i| {
+                let path = dir.join(format!("f{i}.txt"));
+                std::fs::write(&path, b"x").unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        paths.push(dir.join("missing.txt").to_string_lossy().into_owned());
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let done = AtomicUsize::new(0);
+        let moved = trash_paths(&refs, &|count| {
+            done.fetch_add(count, Ordering::Relaxed);
+        });
+        assert_eq!(done.load(Ordering::Relaxed), refs.len());
+        assert!(moved[..25].iter().all(|moved| *moved));
+        assert!(!moved[25]);
+        assert!(refs[..25].iter().all(|path| !std::path::Path::new(path).exists()));
+    }
 }

@@ -1,0 +1,16 @@
+{
+  "version": "0.3.2-personal.2",
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "wix": {
+        "version": "0.3.2.2"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}

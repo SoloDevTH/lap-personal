@@ -219,34 +219,79 @@ pub(crate) fn apple_aae_sidecar_paths(file_path: &str) -> Vec<PathBuf> {
     let direct_name = format!("{}.aae", stem).to_ascii_lowercase();
     let full_name = format!("{}.aae", file_name).to_ascii_lowercase();
 
+    // Windows paths are case-insensitive, so probing the two candidate names
+    // finds the sidecars directly, and canonicalize() returns the on-disk
+    // casing (IMG_0001.AAE) for just that file. Scanning the folder instead
+    // cost ~10 ms per photo in 10k-file iPhone folders, so deleting 1,000
+    // photos spent ~10 s here before the first file moved.
+    // ponytail: misses "IMG.AAE" in per-directory case-sensitive folders
+    // (WSL-enabled); scan the folder there if that ever matters.
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
-    let Ok(entries) = fs::read_dir(parent) else {
-        return Vec::new();
-    };
-
-    for entry in entries.flatten() {
-        let sidecar = entry.path();
-        if !sidecar.is_file() {
+    for candidate in [direct_name, full_name] {
+        let probe = parent.join(&candidate);
+        if !probe.is_file() {
             continue;
         }
-        let Some(ext) = sidecar.extension().and_then(|ext| ext.to_str()) else {
-            continue;
-        };
-        if !ext.eq_ignore_ascii_case("aae") {
-            continue;
-        }
-        let Some(name) = sidecar.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let normalized_name = name.to_ascii_lowercase();
-        if (normalized_name == direct_name || normalized_name == full_name)
-            && seen.insert(normalize_sidecar_path_key(&sidecar))
-        {
+        let sidecar = fs::canonicalize(&probe)
+            .ok()
+            .and_then(|real| real.file_name().map(|name| parent.join(name)))
+            .unwrap_or(probe);
+        if seen.insert(normalize_sidecar_path_key(&sidecar)) {
             paths.push(sidecar);
         }
     }
     paths
+}
+
+/// Batch AAE lookup: lists each parent folder once and answers from memory.
+/// On exFAT (no directory index) every single-name lookup scans the whole
+/// folder, so per-photo probes cost ~5 ms each in 10k-file folders.
+#[derive(Default)]
+pub(crate) struct AaeIndex {
+    // folder -> lowercased AAE file name -> on-disk path
+    folders: HashMap<PathBuf, HashMap<String, PathBuf>>,
+}
+
+impl AaeIndex {
+    pub(crate) fn sidecars(&mut self, file_path: &str) -> Vec<PathBuf> {
+        let path = Path::new(file_path);
+        let (Some(parent), Some(stem), Some(file_name)) = (
+            path.parent(),
+            path.file_stem().and_then(|stem| stem.to_str()),
+            path.file_name().and_then(|name| name.to_str()),
+        ) else {
+            return Vec::new();
+        };
+        let aae_files = self.folders.entry(parent.to_path_buf()).or_insert_with(|| {
+            fs::read_dir(parent)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        // file_type() comes with the directory listing on
+                        // Windows; no extra per-entry syscall.
+                        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                        .filter_map(|entry| {
+                            let name = entry.file_name().to_str()?.to_ascii_lowercase();
+                            name.ends_with(".aae").then(|| (name, entry.path()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for candidate in [
+            format!("{}.aae", stem).to_ascii_lowercase(),
+            format!("{}.aae", file_name).to_ascii_lowercase(),
+        ] {
+            if let Some(sidecar) = aae_files.get(&candidate) {
+                if !paths.contains(sidecar) {
+                    paths.push(sidecar.clone());
+                }
+            }
+        }
+        paths
+    }
 }
 
 pub(crate) fn delete_apple_aae_sidecars(file_path: &str, permanently: bool) -> Result<(), String> {

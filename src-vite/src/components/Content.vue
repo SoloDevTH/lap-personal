@@ -708,7 +708,7 @@
 
 <script setup lang="ts">
 
-import { ref, watch, computed, createVNode, onMounted, onBeforeUnmount, nextTick, render, markRaw } from 'vue';
+import { ref, watch, computed, createVNode, onMounted, onBeforeUnmount, nextTick, render, markRaw, toRaw } from 'vue';
 import { emit as tauriEmit, listen } from '@tauri-apps/api/event';
 import { ask, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -1009,8 +1009,19 @@ const setItemSelected = (index: number, selected: boolean) => {
   }
   applySelectionDelta(item, selected ? 1 : -1);
 };
-const getActionableSelectedItems = () =>
-  fileList.value.filter(item => isRealFileItem(item) && (item.isSelected || selectedFileIds.has(Number(item.id))));
+// Scans the raw array: filtering the reactive list creates a proxy per row
+// (~250 ms for 570k rows). Only the selected rows are returned as proxies.
+const getActionableSelectedItems = () => {
+  const raw = toRaw(fileList.value);
+  const selected: any[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    if (isRealFileItem(item) && (item.isSelected || selectedFileIds.has(Number(item.id)))) {
+      selected.push(fileList.value[i]);
+    }
+  }
+  return selected;
+};
 const selectedFiles = computed(() => {
   selectedFilesVersion.value;
   return selectMode.value ? getActionableSelectedItems() : [];
@@ -1148,7 +1159,7 @@ function captureSelectionForFileListRefresh() {
   if (!selectMode.value) return;
 
   const selectedSizes = new Map<number, number>();
-  for (const file of fileList.value) {
+  for (const file of toRaw(fileList.value)) {
     const fileId = Number(file?.id || 0);
     if (fileId > 0 && selectedFileIds.has(fileId)) {
       selectedSizes.set(fileId, Number(file?.size || 0));
@@ -1222,8 +1233,12 @@ async function restoreSelectionAfterFileListRefresh() {
 
     selectedFileIds.clear();
     for (const fileId of nextSelectedIds) selectedFileIds.add(fileId);
-    for (const file of fileList.value) {
-      if (isRealFileItem(file)) file.isSelected = selectedFileIds.has(Number(file.id));
+    const rawFiles = toRaw(fileList.value);
+    for (let i = 0; i < rawFiles.length; i++) {
+      const file = rawFiles[i];
+      if (!isRealFileItem(file)) continue;
+      const selected = selectedFileIds.has(Number(file.id));
+      if (Boolean(file.isSelected) !== selected) fileList.value[i].isSelected = selected;
     }
     selectedCount.value = selectedFileIds.size;
     selectedSize.value = nextSelectedIds.size === restoreState.selectedIds.size
@@ -1325,8 +1340,9 @@ watch(fileList, () => {
 });
 
 function clearLoadedSelectionFlags() {
-  for (const file of fileList.value) {
-    if (file) file.isSelected = false;
+  const raw = toRaw(fileList.value);
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i]?.isSelected) fileList.value[i].isSelected = false;
   }
 }
 
@@ -1575,18 +1591,14 @@ async function ensureFolderGroupRoots() {
   }
 }
 
+// Updated in place: copying the whole map per selected file made selecting
+// thousands of rows quadratic in the number of groups.
 function updateGroupSelectedCount(groupId: string, count: number) {
-  groupSelectedCountMap.value = {
-    ...groupSelectedCountMap.value,
-    [groupId]: Math.max(0, count),
-  };
+  groupSelectedCountMap.value[groupId] = Math.max(0, count);
 }
 
 function updateGroupSelectedSize(groupId: string, size: number) {
-  groupSelectedSizeMap.value = {
-    ...groupSelectedSizeMap.value,
-    [groupId]: Math.max(0, size),
-  };
+  groupSelectedSizeMap.value[groupId] = Math.max(0, size);
 }
 
 function syncSelectionVersions() {
@@ -1633,7 +1645,7 @@ function recomputeLoadedGroupSelectedCounts() {
     nextSize[groupId] = 0;
   }
 
-  for (const file of fileList.value) {
+  for (const file of toRaw(fileList.value)) {
     if (!isRealFileItem(file)) continue;
     const fileId = Number(file.id || 0);
     const groupId = fileIdToGroupId.get(fileId);
@@ -1918,6 +1930,7 @@ const fileConflictDialog = ref({
 let fileConflictResolver: ((result: { policy: FileConflictPolicy; applyAll: boolean }) => void) | null = null;
 const showTrashMsgbox = ref(false);
 const isTrashDeleting = ref(false);
+const trashProgress = ref<{ done: number; total: number } | null>(null);
 const showTrashFailedMsgbox = ref(false);
 const showExternalOpenWarningMsgbox = ref(false);
 const showExternalAppsDialog = ref(false);
@@ -2262,8 +2275,12 @@ const trashMsgboxMessage = computed(() => {
   const companionNotice = rawJpegCompanionDeleteCount.value > 0
     ? `\n${localeMsg.value.msgbox.move_to_trash.raw_jpeg_companions_content.replace('{count}', rawJpegCompanionDeleteCount.value.toLocaleString())}`
     : '';
-  if (dedupReclaimBytes.value <= 0 || !(isDedupTrash.value || selectMode.value)) return `${base}${companionNotice}`;
-  return `${base}${companionNotice}\n${localeMsg.value.info_panel.dedup.reclaimable_size}: ${formatFileSize(dedupReclaimBytes.value)}`;
+  // Live "done / total" while a batch delete runs, so a long delete visibly progresses.
+  const progress = isTrashDeleting.value && trashProgress.value && trashProgress.value.total > 1
+    ? `\n\n${trashProgress.value.done.toLocaleString()} / ${trashProgress.value.total.toLocaleString()}`
+    : '';
+  if (dedupReclaimBytes.value <= 0 || !(isDedupTrash.value || selectMode.value)) return `${base}${companionNotice}${progress}`;
+  return `${base}${companionNotice}\n${localeMsg.value.info_panel.dedup.reclaimable_size}: ${formatFileSize(dedupReclaimBytes.value)}${progress}`;
 });
 
 const trashFailedMsgboxMessage = computed(() => {
@@ -4597,6 +4614,76 @@ const handleKeyDown = (e: any) => {
 let unlistenIndexProgress: (() => void) | undefined;
 let unlistenIndexFinished: (() => void) | undefined;
 let unlistenThumbnailReady: (() => void) | undefined;
+
+// `thumbnail_ready` arrives many times a second while thumbnails are generated.
+// Filtering the reactive list (170k-570k rows, ~170 ms through Vue proxies) once
+// per event froze the UI, so events are merged and the raw array is scanned once
+// per flush.
+const THUMB_READY_FLUSH_MS = 150;
+const pendingReadyThumbIds = new Set<number>();
+const pendingInvalidatedThumbIds = new Set<number>();
+let thumbReadyFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Reactive rows whose id is in `ids`, found without creating a proxy per row.
+function findLoadedFiles(ids: Set<number>, onlyWithoutThumbnail: boolean) {
+  const raw = toRaw(fileList.value);
+  const found: any[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const file = raw[i];
+    if (!file || file.isPlaceholder) continue;
+    if (onlyWithoutThumbnail && file.thumbnail) continue;
+    if (ids.has(Number(file.id || 0))) found.push(fileList.value[i]);
+  }
+  return found;
+}
+
+async function flushReadyThumbnails() {
+  thumbReadyFlushTimer = null;
+  const readyIds = new Set(pendingReadyThumbIds);
+  const invalidatedIds = new Set(pendingInvalidatedThumbIds);
+  pendingReadyThumbIds.clear();
+  pendingInvalidatedThumbIds.clear();
+  if (fileList.value.length === 0) return;
+
+  // A normal scan emits this event when the thumbnail first becomes ready.
+  // The streaming list is already fetching that image, so clearing it here
+  // would turn a successful first paint into a second, visible load.
+  if (readyIds.size > 0) {
+    const missingFiles = findLoadedFiles(readyIds, true);
+    if (missingFiles.length > 0) getFileListThumb(missingFiles);
+  }
+
+  // The backend has just replaced these thumbnails after detecting a changed
+  // file; only invalidation events represent an existing thumbnail being replaced.
+  if (invalidatedIds.size === 0) return;
+  const loadedFiles = findLoadedFiles(invalidatedIds, false);
+  if (loadedFiles.length === 0) return;
+
+  // Pick up the new modified_at value before rebuilding URLs; it is the
+  // persistent cache version for this file's contents.
+  await Promise.all(loadedFiles.map(async (file: any) => {
+    const refreshed = await getFileInfo(Number(file.id));
+    if (refreshed && fileList.value.includes(file)) Object.assign(file, refreshed);
+  }));
+
+  // Reload the regenerated thumbnails instead of retaining the old values
+  // that arrived with the refreshed file list.
+  for (const file of loadedFiles) {
+    file.thumbnail = '';
+  }
+
+  // Match Refresh file info: changing filePath makes Image.vue reload the
+  // currently displayed file after its on-disk contents have changed.
+  const activeFile = fileList.value[selectedItemIndex.value];
+  if (activeFile && invalidatedIds.has(Number(activeFile.id || 0)) && activeFile.file_path) {
+    const activePath = activeFile.file_path;
+    activeFile.file_path = '';
+    await nextTick();
+    activeFile.file_path = activePath;
+  }
+
+  getFileListThumb(loadedFiles, 0, 8, true);
+}
 let unlistenTriggerNextAlbum: (() => void) | undefined;
 let unlistenRefreshContent: (() => void) | undefined;
 let unlistenFilesDeleted: (() => void) | undefined;
@@ -5376,65 +5463,22 @@ onMounted( async() => {
     refreshLibraryTotalCount();
   });
 
-  unlistenThumbnailReady = await listen('thumbnail_ready', async (event: any) => {
+  unlistenThumbnailReady = await listen('thumbnail_ready', (event: any) => {
     const { file_ids, invalidate = true } = event.payload || {};
     if (!Array.isArray(file_ids) || file_ids.length === 0) return;
 
-    const readyIds = new Set(
-      file_ids.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id) && id > 0)
-    );
-    if (readyIds.size === 0) return;
-
-    // A normal scan emits this event when the thumbnail first becomes ready.
-    // The streaming list is already fetching that image, so clearing it here
-    // would turn a successful first paint into a second, visible load. Only
-    // invalidation events represent an existing thumbnail being replaced.
-    if (!invalidate) {
-      if (fileList.value.length === 0) return;
-      const missingFiles = fileList.value.filter(
-        (file: any) => file && !file.isPlaceholder && !file.thumbnail && readyIds.has(Number(file.id || 0))
-      );
-      if (missingFiles.length > 0) getFileListThumb(missingFiles);
-      return;
+    const target = invalidate ? pendingInvalidatedThumbIds : pendingReadyThumbIds;
+    for (const id of file_ids) {
+      const fileId = Number(id);
+      if (!Number.isFinite(fileId) || fileId <= 0) continue;
+      target.add(fileId);
+      // Drop replaced data-URL entries at once, even when this view is empty,
+      // so a later list render cannot reuse an outdated image from memory.
+      if (invalidate) clearCachedThumbnailDataUrl(fileId, config.settings.thumbnailSize);
     }
-
-    // The backend has just replaced these thumbnails after detecting a changed
-    // file. Drop their data-URL entries even when this view is empty, so a
-    // later list render cannot reuse an outdated image from memory.
-    for (const fileId of readyIds) {
-      clearCachedThumbnailDataUrl(fileId, config.settings.thumbnailSize);
+    if (!thumbReadyFlushTimer) {
+      thumbReadyFlushTimer = setTimeout(flushReadyThumbnails, THUMB_READY_FLUSH_MS);
     }
-    if (fileList.value.length === 0) return;
-
-    const loadedFiles = fileList.value.filter(
-      (file: any) => file && !file.isPlaceholder && readyIds.has(Number(file.id || 0))
-    );
-    if (loadedFiles.length === 0) return;
-
-    // Pick up the new modified_at value before rebuilding URLs; it is the
-    // persistent cache version for this file's contents.
-    await Promise.all(loadedFiles.map(async (file: any) => {
-      const refreshed = await getFileInfo(Number(file.id));
-      if (refreshed && fileList.value.includes(file)) Object.assign(file, refreshed);
-    }));
-
-    // Reload the regenerated thumbnails instead of retaining the old values
-    // that arrived with the refreshed file list.
-    for (const file of loadedFiles) {
-      file.thumbnail = '';
-    }
-
-    // Match Refresh file info: changing filePath makes Image.vue reload the
-    // currently displayed file after its on-disk contents have changed.
-    const activeFile = fileList.value[selectedItemIndex.value];
-    if (activeFile && readyIds.has(Number(activeFile.id || 0)) && activeFile.file_path) {
-      const activePath = activeFile.file_path;
-      activeFile.file_path = '';
-      await nextTick();
-      activeFile.file_path = activePath;
-    }
-
-    getFileListThumb(loadedFiles, 0, 8, true);
   });
 
   // listen for external refresh requests (e.g. from folder context menu)
@@ -5542,6 +5586,10 @@ onBeforeUnmount(() => {
   if (layoutRefreshTimer) {
     clearTimeout(layoutRefreshTimer);
     layoutRefreshTimer = null;
+  }
+  if (thumbReadyFlushTimer) {
+    clearTimeout(thumbReadyFlushTimer);
+    thumbReadyFlushTimer = null;
   }
   window.removeEventListener('keydown', handleLocalKeyDown);
   window.removeEventListener('keyup', handleLocalKeyUp);
@@ -6438,7 +6486,7 @@ async function getActionableSelectedItemsForAction() {
     return hydratedItems;
   }
 
-  const hasSelectedPlaceholders = fileList.value.some(
+  const hasSelectedPlaceholders = toRaw(fileList.value).some(
     item => item?.isSelected && item?.isPlaceholder,
   );
   if (hasSelectedPlaceholders && !await hydrateRangeForSelection(0, fileList.value.length)) {
@@ -8399,6 +8447,10 @@ const onTrashAllDuplicates = async () => {
 const handleTrashMsgboxOk = async () => {
   if (isTrashDeleting.value) return;
   isTrashDeleting.value = true;
+  trashProgress.value = null;
+  const unlistenProgress = await listen<{ done: number; total: number }>('batch-delete-progress', (event) => {
+    trashProgress.value = event.payload;
+  });
   try {
     if (isDedupBulkTrash.value) {
       await onTrashAllDuplicates();
@@ -8406,6 +8458,8 @@ const handleTrashMsgboxOk = async () => {
       await onTrashFile();
     }
   } finally {
+    unlistenProgress();
+    trashProgress.value = null;
     isTrashDeleting.value = false;
   }
 };
@@ -9848,7 +9902,9 @@ async function getFileListThumb(files: any[], offset = 0, concurrencyLimit = 4, 
   // Use current request ID to check for cancellation
   const requestId = currentThumbRequestId;
   const thumbnailSize = config.settings.thumbnailSize;
-  const batchSize = Math.max(1, concurrencyLimit);
+  // Files per IPC call; the limit is how many calls run at once. Tying the two
+  // together meant 4 files per call and one backend round trip per 4 thumbnails.
+  const batchSize = Math.max(16, concurrencyLimit);
 
   const applyThumbToFile = (file: any, thumb: any) => {
     if (!thumb) return;

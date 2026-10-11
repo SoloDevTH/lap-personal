@@ -413,10 +413,12 @@ async fn main() {
                     }
                 }
                 tauri::RunEvent::Exit { .. } => {
+                    // The Aptabase plugin is only registered when APTABASE_KEY is
+                    // set at build time; flushing without it panics on exit.
                     if aptabase_enabled {
                         let _ = app_handle.track_event("app_exited", None);
+                        app_handle.flush_events_blocking();
                     }
-                    app_handle.flush_events_blocking();
                 }
                 _ => {}
             });

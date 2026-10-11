@@ -314,7 +314,8 @@ fn build_libjpeg(manifest_dir: &Path, out_dir: &Path) -> Option<JpegBuild> {
         return None;
     }
 
-    let build_root = out_dir.join("libjpeg-build");
+    // "-crt-dll": new cache dir so builds made before WITH_CRT_DLL are not reused.
+    let build_root = out_dir.join("libjpeg-build-crt-dll");
     let binary_dir = build_root.join("build");
 
     let (static_lib, lib_name) = ("jpeg-static.lib", "jpeg-static");
@@ -330,6 +331,10 @@ fn build_libjpeg(manifest_dir: &Path, out_dir: &Path) -> Option<JpegBuild> {
             .arg("-DCMAKE_POSITION_INDEPENDENT_CODE=ON")
             .arg("-DENABLE_SHARED=FALSE")
             .arg("-DENABLE_STATIC=TRUE")
+            // Link against the CRT DLL (/MD) like Rust and the other C libs;
+            // the default static CRT (/MT) mixed two C runtimes in one exe
+            // (linker warning LNK4098: LIBCMT conflicts).
+            .arg("-DWITH_CRT_DLL=TRUE")
             .arg(source_dir.as_os_str())
             .current_dir(&binary_dir);
 
