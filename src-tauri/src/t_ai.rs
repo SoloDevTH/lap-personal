@@ -33,11 +33,31 @@ pub struct AiEngine {
     text_model_kind: ImageSearchTextModel,
 }
 
-/// ONNX intra-op threads: about 85% of logical cores (min 2), so AI search
-/// indexing uses most of the machine while leaving headroom for the UI.
+/// ONNX worker threads, created at below-normal priority: AI indexing can use
+/// all spare CPU without slowing the rest of the PC.
+pub(crate) struct BackgroundThreads;
+
+impl ort::environment::ThreadManager for BackgroundThreads {
+    type Thread = std::thread::JoinHandle<()>;
+
+    fn create(&mut self, worker: ort::environment::ThreadWorker) -> ort::Result<Self::Thread> {
+        Ok(std::thread::spawn(move || {
+            crate::t_utils::run_at_background_priority(|| worker.work())
+        }))
+    }
+
+    fn join(thread: Self::Thread) -> ort::Result<()> {
+        let _ = thread.join();
+        Ok(())
+    }
+}
+
+/// ONNX intra-op threads: about 25% of logical cores (min 2). AI indexing runs
+/// alongside the scan's thumbnail workers (50%), so together they stay near
+/// the 50-75% budget instead of filling the machine.
 fn ai_intra_threads() -> usize {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    (cores * 85 / 100).max(2)
+    (cores * 25 / 100).max(2)
 }
 
 const MULTILINGUAL_TEXT_MODEL_URL: &str =
@@ -206,12 +226,25 @@ impl AiEngine {
     }
 
     fn load_session(path: &Path, model_name: &str) -> Result<Session, String> {
-        Session::builder()
+        let mut builder = Session::builder()
             .map_err(|e| e.to_string())?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| e.to_string())?
             .with_intra_threads(ai_intra_threads())
             .map_err(|e| e.to_string())?
+            // Idle ONNX threads otherwise busy-wait, holding whole cores at
+            // 100% between images and making the rest of the PC laggy.
+            .with_intra_op_spinning(false)
+            .map_err(|e| e.to_string())?;
+        // Only background indexing (vision) runs below normal priority; the
+        // text model encodes the user's search query, which must not wait
+        // behind other programs.
+        if model_name == "vision" {
+            builder = builder
+                .with_thread_manager(crate::t_ai::BackgroundThreads)
+                .map_err(|e| e.to_string())?;
+        }
+        builder
             .commit_from_file(path)
             .map_err(|e| format!("Failed to load {} model from {:?}: {}", model_name, path, e))
     }
@@ -440,14 +473,17 @@ impl AiEngine {
     fn run_vision_model(&mut self, image_input: Array4<f32>) -> Result<Vec<f32>, String> {
         let image_input_value = Value::from_array(image_input).map_err(|e| e.to_string())?;
 
-        let outputs = self
+        let model = self
             .vision_model
             .as_mut()
-            .unwrap()
-            .run(inputs![
+            .unwrap();
+        // The calling thread works alongside the pool; keep it low too.
+        let outputs = crate::t_utils::run_at_background_priority(|| {
+            model.run(inputs![
                 "pixel_values" => image_input_value,
             ])
-            .map_err(|e| format!("Inference error: {}", e))?;
+        })
+        .map_err(|e| format!("Inference error: {}", e))?;
 
         let embedding = if let Some(vals) = outputs.get("pooler_output") {
             vals
@@ -494,9 +530,10 @@ impl AiEngine {
         let views: Vec<_> = images.iter().map(|image| image.view()).collect();
         let batch = ndarray::concatenate(ndarray::Axis(0), &views).map_err(|e| e.to_string())?;
         let batch_value = Value::from_array(batch).map_err(|e| e.to_string())?;
-        let outputs = model
-            .run(inputs!["pixel_values" => batch_value])
-            .map_err(|e| format!("Inference error: {}", e))?;
+        let outputs = crate::t_utils::run_at_background_priority(|| {
+            model.run(inputs!["pixel_values" => batch_value])
+        })
+        .map_err(|e| format!("Inference error: {}", e))?;
         let embedding = if let Some(vals) = outputs.get("pooler_output") {
             vals
         } else if let Some(vals) = outputs.get("image_embeds") {

@@ -114,6 +114,12 @@ impl FaceEngine {
             .map_err(|e| e.to_string())?
             .with_intra_threads(4)
             .map_err(|e| e.to_string())?
+            // Idle ONNX threads otherwise busy-wait, holding whole cores at
+            // 100% between images and making the rest of the PC laggy.
+            .with_intra_op_spinning(false)
+            .map_err(|e| e.to_string())?
+            .with_thread_manager(crate::t_ai::BackgroundThreads)
+            .map_err(|e| e.to_string())?
             .commit_from_file(&detection_model_path)
             .map_err(|e| format!("Failed to load detection model: {}", e))?;
 
@@ -125,6 +131,12 @@ impl FaceEngine {
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| e.to_string())?
             .with_intra_threads(4)
+            .map_err(|e| e.to_string())?
+            // Idle ONNX threads otherwise busy-wait, holding whole cores at
+            // 100% between images and making the rest of the PC laggy.
+            .with_intra_op_spinning(false)
+            .map_err(|e| e.to_string())?
+            .with_thread_manager(crate::t_ai::BackgroundThreads)
             .map_err(|e| e.to_string())?
             .commit_from_file(&embedding_model_path)
             .map_err(|e| format!("Failed to load embedding model: {}", e))?;
@@ -217,10 +229,12 @@ impl FaceEngine {
 
         // Use block scope to ensure outputs is dropped before calling nms
         let mut faces = {
-            let outputs = self
+            let model = self
                 .detection_model
                 .as_mut()
-                .unwrap()
+                .unwrap();
+            // Runs on the face-indexing thread, already below normal priority.
+            let outputs = model
                 .run(inputs!["input.1" => input_value])
                 .map_err(|e| format!("Detection inference error: {}", e))?;
 
@@ -414,10 +428,11 @@ impl FaceEngine {
 
         let input_value = Value::from_array(array).map_err(|e| e.to_string())?;
 
-        let outputs = self
+        let model = self
             .embedding_model
             .as_mut()
-            .unwrap()
+            .unwrap();
+        let outputs = model
             .run(inputs!["input.1" => input_value])
             .map_err(|e| format!("Embedding inference error: {}", e))?;
 
@@ -642,7 +657,9 @@ pub fn run_face_indexing(
         progress.phase = "indexing".to_string();
     }
 
-    tauri::async_runtime::spawn(async move {
+    // Detection and embedding are blocking work that runs for hours on a big
+    // library: own thread, below-normal priority, not an async worker.
+    std::thread::spawn(move || crate::t_utils::run_at_background_priority(move || {
         // 1. Initialization
         let reset_status = || {
             if let Ok(mut running) = status_token.lock() {
@@ -906,7 +923,7 @@ pub fn run_face_indexing(
             }),
         );
         reset_status();
-    });
+    }));
 
     Ok(())
 }

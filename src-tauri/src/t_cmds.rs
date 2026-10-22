@@ -479,14 +479,17 @@ pub async fn remove_album(state: State<'_, IndexCancellation>, id: i64) -> Resul
     state.0.lock().unwrap().insert(id, true);
     t_utils::wait_for_album_scan_end(id).await?;
 
-    let result = {
+    // Waiting for the sync lock and deleting a large album take tens of
+    // seconds of blocking work: keep it off the async workers.
+    let result = blocking(move || {
         let album_sync_lock = t_utils::album_sync_lock(id);
         let _album_sync_guard = album_sync_lock
             .lock()
             .map_err(|_| format!("Album sync lock poisoned: {}", id))?;
         Album::delete_from_db(id)
-            .map_err(|e| format!("Error while removing album with id {}: {}", id, e))?
-    };
+            .map_err(|e| format!("Error while removing album with id {}: {}", id, e))
+    })
+    .await?;
     t_utils::release_album_sync_lock(id);
 
     let library_id = crate::t_config::load_app_config()
@@ -495,10 +498,17 @@ pub async fn remove_album(state: State<'_, IndexCancellation>, id: i64) -> Resul
     let album_cache_dir = crate::t_config::get_app_cache_dir()
         .map(|dir| dir.join(library_id).join(id.to_string()))
         .map_err(|e| format!("Error while resolving album thumbnail cache path: {}", e))?;
-    if album_cache_dir.exists() {
-        std::fs::remove_dir_all(&album_cache_dir)
-            .map_err(|e| format!("Error while removing album thumbnail cache: {}", e))?;
-    }
+    // The album is gone from the catalog; its cached thumbnails (one file per
+    // photo, ~550k for a large album) are removed in the background.
+    std::thread::spawn(move || {
+        t_utils::run_at_background_priority(|| {
+            if album_cache_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&album_cache_dir) {
+                    eprintln!("Error while removing album thumbnail cache: {}", e);
+                }
+            }
+        })
+    });
 
     Ok(result)
 }
@@ -2468,9 +2478,9 @@ fn get_file_thumbs_sync(
         }));
     }
 
-    // Phase 2: check each cached thumbnail against its source file. That is a
-    // file-system lookup per photo (~5 ms on exFAT) plus a cache-file read, so
-    // run them side by side instead of one after another.
+    // Phase 2: check each cached thumbnail against its source file (a stat per
+    // photo, so an edit made in another program shows up) plus a cache-file
+    // read; run them side by side instead of one after another.
     let embedded = raw_thumbnail_source == "embedded";
     let resolve = |item: &mut Pending| -> Result<Option<AThumb>, String> {
         match item.fetched.take() {

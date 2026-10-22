@@ -1,14 +1,59 @@
 <div align="center">
   <img src="docs/public/icon.png" alt="Lap Logo" width="120" style="border-radius: 20px">
-  <h1>Lap - Private Local Photo Manager</h1>
-  <h3>Open-source desktop photo manager for Windows.</h3>
+  <h1>Lap Personal Edition</h1>
+  <h3>A Windows-only, large-library fork of <a href="https://github.com/julyx10/lap">Lap</a> by julyx10.</h3>
   <p>
-    <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/v/release/julyx10/lap" alt="GitHub release"></a>
-    <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/downloads/julyx10/lap/total" alt="GitHub all releases"></a>
-    <a href="https://github.com/julyx10/lap/stargazers"><img src="https://img.shields.io/github/stars/julyx10/lap" alt="GitHub stars"></a>
+    <a href="https://github.com/SoloDevTH/lap-personal/releases"><img src="https://img.shields.io/github/v/release/SoloDevTH/lap-personal" alt="GitHub release"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License GPL-3.0"></a>
   </p>
 </div>
 
+> [!NOTE]
+> This is an unofficial, modified version of **[Lap](https://github.com/julyx10/lap)**, created by **julyx10**.
+> All credit for the original application goes to julyx10 and the Lap contributors.
+> Please report problems with this edition here, not to the upstream project.
+
+## About this edition
+
+Lap Personal Edition is based on Lap 0.3.2. It is tuned for very large libraries (tested with about 545,000 photos) on Windows.
+Versions are labelled `0.3.2-personal.N` so they are easy to tell apart from official Lap releases.
+
+### Changes from upstream Lap
+
+**Windows only**
+- macOS and Linux code, builds and CI were removed.
+
+**Security and stability**
+- Removed the local video HTTP server.
+- Added a Content Security Policy.
+- Fixed panics in URL decoding and in image decoders, which previously crashed the app in release builds.
+- Escaped `LIKE` wildcards in searches.
+- Validated library ids before using them in cache paths.
+- A drive that is not connected is no longer treated as "file deleted".
+
+**Deleting**
+- Files move to the Recycle Bin in batches on several threads.
+- A progress bar is shown, and the dialog always closes when deletion finishes.
+- Deleted photos disappear from the grid right away, without reloading the page.
+- Deleting files that are already gone no longer reports an error.
+
+**Speed with large libraries**
+- Selecting many photos no longer freezes the window.
+- Thumbnails are generated in a newest-first queue, and cached thumbnails are checked in parallel.
+- Folder sync skips files that have not changed.
+- Duplicate scan only hashes files with the same size and dimensions, and reports progress smoothly.
+- Removing an album deletes its rows in small batches, so the app stays responsive.
+- Scan progress no longer gets stuck near 100% when some files fail.
+
+**CPU use**
+- Scanning, thumbnails, duplicate/similar search and AI indexing run at below-normal priority.
+- They are limited to about half of the CPU, so the PC stays usable while Lap works.
+
+The updater is disabled in this edition; download new versions from the [Releases](https://github.com/SoloDevTH/lap-personal/releases) page.
+
+---
+
+*The rest of this README is from upstream Lap.*
 
 English | [Deutsch](i18n/README.de.md) | [Français](i18n/README.fr.md) | [Español](i18n/README.es.md) | [Português](i18n/README.pt.md) | [Русский](i18n/README.ru.md) | [简体中文](i18n/README.zh-CN.md) | [日本語](i18n/README.ja.md) | [한국어](i18n/README.ko.md)
 
@@ -21,11 +66,14 @@ It is a privacy-focused alternative to cloud photo services: no forced upload, l
 
 ## Download Lap
 
-Open the [latest release page](https://github.com/julyx10/lap/releases/latest), then download the file that matches your system:
+For this edition, open the [latest release page](https://github.com/SoloDevTH/lap-personal/releases/latest) and download `Lap_<version>_x64_en-US.msi`.
+For official Lap, use the [upstream releases](https://github.com/julyx10/lap/releases/latest).
 
 | Platform | Package | Note |
 | :-- | :-- | :-- |
-| **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | Unsigned — if SmartScreen blocks the download, click **Keep anyway** |
+| **Windows 10/11 (x64)** | `_x64_en-US.msi` | Unsigned. If SmartScreen blocks the download, click **Keep anyway** |
+
+This edition uses the same app id as official Lap, so installing it replaces official Lap and keeps your existing library.
 
 ## Screenshots
 
@@ -107,8 +155,8 @@ If you selected a custom database storage directory in Lap settings, delete that
 Requirements: Windows 10/11, Visual Studio 2022 Build Tools (C++ workload), CMake, Node.js 20+, pnpm, Rust stable (MSVC toolchain).
 
 ```powershell
-git clone --recursive https://github.com/julyx10/lap.git
-cd lap
+git clone --recursive https://github.com/SoloDevTH/lap-personal.git
+cd lap-personal
 git submodule update --init --recursive
 cargo install tauri-cli --version "^2.0.0" --locked
 .\scripts\download_models.ps1
@@ -116,6 +164,14 @@ cargo install tauri-cli --version "^2.0.0" --locked
 cd src-vite; pnpm install; cd ..
 cargo tauri dev
 ```
+
+Build the Personal Edition installer:
+
+```powershell
+cargo tauri build --bundles msi --config src-tauri/tauri.personal.conf.json
+```
+
+If the C++ compiler runs out of memory, limit parallel jobs first: `$env:CARGO_BUILD_JOBS=2; $env:CMAKE_BUILD_PARALLEL_LEVEL=1`.
 
 ## Supported Formats
 
@@ -148,6 +204,14 @@ Lap supports 60+ photo, RAW, and video formats.
 | [Leaflet](https://leafletjs.com/) | Interactive map for geotagged photos |
 | [daisyUI](https://daisyui.com/) | UI component library |
 
+## Credits
+
+- **[Lap](https://github.com/julyx10/lap)** by **julyx10** ([website](https://julyx10.github.io/lap/)): the original application. Almost all of the code here is theirs. If you like Lap, please star and support the upstream project.
+- Personal Edition changes by [SoloDevTH](https://github.com/SoloDevTH), made with help from [Claude Code](https://claude.com/claude-code).
+- Third-party libraries listed above under [Key Libraries](#key-libraries), each under its own license. LibRaw, libheif, libde265 and libjpeg-turbo are included as git submodules in `src-tauri/third_party`.
+
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+GPL-3.0-or-later, the same license as upstream Lap. See [LICENSE](LICENSE).
+
+This is a modified version of Lap. The changes are listed in [Changes from upstream Lap](#changes-from-upstream-lap) and in the git history of this repository.

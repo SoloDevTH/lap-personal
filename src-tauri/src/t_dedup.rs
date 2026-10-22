@@ -107,14 +107,18 @@ pub fn start_scan(
     }
 
     std::thread::spawn(move || {
-        let result = scan_and_hash_files(
-            &app_handle,
-            &status_clone,
-            &cancel_flag_clone,
-            query_params,
-            collection_id,
-            file_ids,
-        );
+        // Hashing reads every candidate file; below-normal priority keeps the
+        // rest of the PC responsive while it runs.
+        let result = crate::t_utils::run_at_background_priority(|| {
+            scan_and_hash_files(
+                &app_handle,
+                &status_clone,
+                &cancel_flag_clone,
+                query_params,
+                collection_id,
+                file_ids,
+            )
+        });
 
         let mut final_status = status_clone.lock().unwrap();
         match result {
@@ -187,8 +191,13 @@ fn scan_and_hash_files(
     // Step 3: Hash them
     let mut processed = 0;
 
-    // We do batch inserts to speed up DB operations
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // No transaction around the loop: hashing a file takes from milliseconds
+    // to minutes, and a transaction held across it kept SQLite's write lock
+    // (stalling thumbnails and indexing) or, read-then-write, failed with
+    // SQLITE_BUSY_SNAPSHOT when another writer committed in between. Each
+    // hash is saved on its own (autocommit) as soon as it is computed, so a
+    // cancelled scan also keeps what it has done.
+    let mut last_emit = std::time::Instant::now();
 
     for file in files_to_check {
         if cancel_flag.load(Ordering::SeqCst) {
@@ -196,7 +205,7 @@ fn scan_and_hash_files(
         }
 
         // Only hash if mtime changed or hash is missing
-        let needs_hash = check_if_needs_hash(&tx, &file)?;
+        let needs_hash = check_if_needs_hash(&conn, &file)?;
 
         if needs_hash {
             if let Some(path) = &file.file_path {
@@ -208,7 +217,7 @@ fn scan_and_hash_files(
                             .as_secs() as i64;
                         let mtime = file.modified_at.unwrap_or(0);
 
-                        tx.execute(
+                        conn.execute(
                             "INSERT OR REPLACE INTO file_hashes (file_id, hash, file_size, mtime, computed_at)
                              VALUES (?1, ?2, ?3, ?4, ?5)",
                             params![file.id.unwrap(), hash, file.size, mtime, now],
@@ -220,7 +229,8 @@ fn scan_and_hash_files(
         }
 
         processed += 1;
-        if processed % 10 == 0 {
+        if last_emit.elapsed() >= std::time::Duration::from_millis(250) {
+            last_emit = std::time::Instant::now();
             {
                 let mut status = status_mutex.lock().unwrap();
                 status.processed = processed;
@@ -228,8 +238,6 @@ fn scan_and_hash_files(
             let _ = app_handle.emit("dedup-scan-progress", status_mutex.lock().unwrap().clone());
         }
     }
-
-    tx.commit().map_err(|e| e.to_string())?;
 
     // Step 4: Rebuild duplicate groups
     if !cancel_flag.load(Ordering::SeqCst) {
@@ -257,6 +265,9 @@ fn get_db_conn() -> Result<Connection, String> {
     let path = crate::t_storage::get_current_db_path()
         .map_err(|e| format!("Failed to get db path: {}", e))?;
     let conn = Connection::open(&path).map_err(|e| format!("Failed to open db: {}", e))?;
+    // Wait for other writers (thumbnails, indexing) instead of failing at once.
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|e| format!("Failed to set busy timeout: {}", e))?;
     conn.execute("PRAGMA foreign_keys = ON", [])
         .map_err(|e| format!("Failed to enable foreign keys: {}", e))?;
     Ok(conn)
@@ -278,13 +289,13 @@ fn get_files_by_sizes(conn: &Connection) -> Result<Vec<AFile>, String> {
          WHERE a.id NOT IN (
              SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
          )
-         AND a.size IN (
-             SELECT size FROM afiles
+         AND (a.size, COALESCE(a.width, -1), COALESCE(a.height, -1)) IN (
+             SELECT size, COALESCE(width, -1), COALESCE(height, -1) FROM afiles
              WHERE id NOT IN (
                  SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
              )
-             GROUP BY size
-             HAVING COUNT(size) > 1 AND size > 0
+             GROUP BY 1, 2, 3
+             HAVING COUNT(*) > 1 AND size > 0
          )
          ORDER BY a.size DESC"
     ).map_err(|e| e.to_string())?;
@@ -409,17 +420,27 @@ pub fn get_files_by_collection(
     Ok(all_files)
 }
 
+/// Byte-identical files share size and pixel dimensions, so only files that
+/// match another on all three need hashing. Size alone left 386k of 556k
+/// photos as candidates; with dimensions it is 111k. Each one costs a file
+/// open, ~90 ms in a 450k-file exFAT folder.
+fn duplicate_candidate_key(file: &AFile) -> (i64, Option<u32>, Option<u32>) {
+    (file.size, file.width, file.height)
+}
+
 fn filter_suspicious_files(files: Vec<AFile>) -> Vec<AFile> {
-    let mut size_count: HashMap<i64, usize> = HashMap::new();
+    let mut key_count: HashMap<(i64, Option<u32>, Option<u32>), usize> = HashMap::new();
     for file in &files {
         if file.size > 0 {
-            *size_count.entry(file.size).or_insert(0) += 1;
+            *key_count.entry(duplicate_candidate_key(file)).or_insert(0) += 1;
         }
     }
 
     files
         .into_iter()
-        .filter(|file| file.size > 0 && size_count.get(&file.size).copied().unwrap_or(0) > 1)
+        .filter(|file| {
+            file.size > 0 && key_count.get(&duplicate_candidate_key(file)).copied().unwrap_or(0) > 1
+        })
         .collect()
 }
 

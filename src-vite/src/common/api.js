@@ -435,15 +435,13 @@ export async function editAlbum(albumId, newName, newDespription) {
 }
 
 // remove an album
+// Throws on failure so the dialog can show why (a swallowed error looked like
+// the Remove button doing nothing).
 export async function removeAlbum(albumId) {
-  try {
-    const removedAlbum = await invoke('remove_album', { id: albumId });
-    console.log('remove_album', removedAlbum);
-    if (removedAlbum) {
-      return removedAlbum;
-    }
-  } catch (error) {
-    console.log('Failed to remove album:', error);
+  const removedAlbum = await invoke('remove_album', { id: albumId });
+  console.log('remove_album', removedAlbum);
+  if (removedAlbum) {
+    return removedAlbum;
   }
   return null;
 }

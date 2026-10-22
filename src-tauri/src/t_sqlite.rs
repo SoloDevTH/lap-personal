@@ -137,9 +137,13 @@ fn thumb_queue() -> &'static ThumbQueue {
     });
     if first_use {
         for index in 0..crate::t_utils::scan_worker_count() {
+            // Video and ffmpeg-backed thumbnails block on the Tokio runtime
+            // (Handle::try_current); plain threads have no runtime context.
+            let runtime = tauri::async_runtime::handle();
             let _ = std::thread::Builder::new()
                 .name(format!("thumb-worker-{}", index))
                 .spawn(move || {
+                    let _runtime = runtime.inner().enter();
                     crate::t_utils::run_at_background_priority(|| thumb_worker_loop(queue))
                 });
         }
@@ -455,10 +459,32 @@ impl Album {
     /// delete an album from the db
     pub fn delete_from_db(id: i64) -> Result<usize, String> {
         let conn = open_conn()?;
-        let result = conn
-            .execute("DELETE FROM albums WHERE id = ?1", params![id])
+        // A large album cascades to hundreds of thousands of rows (files,
+        // thumbnails, hashes, faces). One DELETE held the write lock for 30 s+
+        // (556k files), so it and every other writer hit the 5 s busy timeout.
+        // Delete the files in batches, each its own short transaction, then
+        // the album row.
+        conn.busy_timeout(Duration::from_secs(60))
             .map_err(|e| e.to_string())?;
-        Ok(result)
+        let deleted = (|| {
+            loop {
+                let removed = conn
+                    .execute(
+                        "DELETE FROM afiles WHERE id IN (
+                            SELECT a.id FROM afiles a JOIN afolders f ON f.id = a.folder_id
+                            WHERE f.album_id = ?1 LIMIT 2000)",
+                        params![id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                if removed == 0 {
+                    break;
+                }
+            }
+            conn.execute("DELETE FROM albums WHERE id = ?1", params![id])
+                .map_err(|e| e.to_string())
+        })();
+        let _ = conn.busy_timeout(Duration::from_secs(5));
+        deleted
     }
 
     pub fn reorder_display_order(items: Vec<AlbumDisplayOrder>) -> Result<usize, String> {

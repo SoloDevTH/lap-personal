@@ -250,7 +250,10 @@
       :OkText="$t('msgbox.remove_album.ok')"
       :cancelText="$t('msgbox.cancel')"
       :warningOk="true"
+      :isLoading="removingAlbum"
+      :errorMessage="removeAlbumError"
       @ok="clickRemoveAlbum"
+      @reset="removeAlbumError = ''"
       @cancel="showRemoveAlbumMsgbox = false"
     />
   </div>
@@ -362,6 +365,8 @@ const albumListRootRef = ref<HTMLElement | null>(null);
 // message boxes
 const showAlbumEdit = ref(false);           // show edit album
 const showRemoveAlbumMsgbox = ref(false);   // show remove album
+const removingAlbum = ref(false);           // a large album takes tens of seconds
+const removeAlbumError = ref('');
 const importAlbum = ref<Album | null>(null);
 
 const albums = ref<Album[]>([]);
@@ -1067,13 +1072,27 @@ const clickCancelIndexAlbum = async (albumId: number) => {
 
 /// Remove an album from the list
 const clickRemoveAlbum = async () => {
+  // One removal at a time; a fresh attempt starts without the last error so
+  // a repeat of the same message still shows (the dialog only reacts to a
+  // changed errorMessage).
+  if (removingAlbum.value) return;
+  removingAlbum.value = true;
+  removeAlbumError.value = '';
   const albumId = selection.albumId.value;
   const removedAlbumIndex = albums.value.findIndex(album => Number(album.id) === Number(albumId));
-  if (albumId > 0 && isAlbumScanning(albumId)) {
-    await clickCancelIndexAlbum(albumId);
-  }
 
-  const removedAlbum = await removeAlbum(selection.albumId.value);
+  let removedAlbum = null;
+  try {
+    if (albumId > 0 && isAlbumScanning(albumId)) {
+      await clickCancelIndexAlbum(albumId);
+    }
+    removedAlbum = await removeAlbum(albumId);
+    if (!removedAlbum) removeAlbumError.value = `Album ${albumId} was not removed.`;
+  } catch (error) {
+    removeAlbumError.value = String(error);
+  } finally {
+    removingAlbum.value = false;
+  }
   if(removedAlbum) {
     showRemoveAlbumMsgbox.value = false;
 

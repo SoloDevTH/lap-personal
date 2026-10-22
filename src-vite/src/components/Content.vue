@@ -7228,6 +7228,7 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
 
   // Reset temp view mode on any content update
   tempViewMode.value = 'none';
+  filesRemovedInTempView.clear();
   showQuickView.value = false;
   isSlideShow.value = false;
   stopSlideShow();
@@ -7721,6 +7722,19 @@ function enterAlbumPreviewMode(file: any, targetFolderPath?: string) {
   getFileList({ searchFolder: folderPath }, requestId);
 }
 
+// Files deleted or moved away while a temporary view (related photos, search,
+// map...) was open. Leaving that view restores a snapshot of the main list
+// taken before, which still holds them, so the main list is reloaded instead.
+const filesRemovedInTempView = new Set<number>();
+
+function noteFilesRemovedInTempView(fileIds: Iterable<any>) {
+  if (tempViewMode.value === 'none') return;
+  for (const id of fileIds) {
+    const fileId = Number(id);
+    if (fileId > 0) filesRemovedInTempView.add(fileId);
+  }
+}
+
 function exitTempViewMode() {
   if (!backupState.value) return;
 
@@ -7778,6 +7792,13 @@ function exitTempViewMode() {
   
   // 4. Ensure the originally selected item is highlighted/visible logic is handled by the restored index
   updateSelectedImage(selectedItemIndex.value);
+
+  // 5. The snapshot predates files removed in the temp view: reload it.
+  if (filesRemovedInTempView.size > 0) {
+    filesRemovedInTempView.clear();
+    pendingRestoreScrollTop.value = state.scrollTop;
+    void updateContent(true);
+  }
 }
 
 function handleTitleClick() {
@@ -8097,9 +8118,11 @@ const onMoveTo = async () => {
           .filter(item => !successIdSet.has(item.id))
           .map(item => Number(item.id)),
       );
+      noteFilesRemovedInTempView(successIdSet);
       fileList.value = fileList.value.filter((f) => !successIdSet.has(f.id));
       totalFileCount.value = fileList.value.length;
       totalFileSize.value = fileList.value.reduce((total, file) => total + file.size, 0);
+      refreshVisibleRowsAfterRemoval();
       selectedItemIndex.value = fileList.value.length > 0 ? Math.min(selectedItemIndex.value, fileList.value.length - 1) : -1;
       rebuildSelectionAfterListMutation(remainingSelectedIds);
       toast.success(t('msgbox.move_to.success', { source: sourceLabel, dest: destLabel }));
@@ -8115,6 +8138,7 @@ const onMoveTo = async () => {
     if(movedFile) {
       console.log('onMoveTo:', movedFile);
       affectedAlbumIds.add(Number(file.album_id || 0));
+      noteFilesRemovedInTempView([file.id]);
       removeFromFileList(selectedItemIndex.value);
       successCount = 1;
       toast.success(t('msgbox.move_to.success', { source: sourceLabel, dest: destLabel }));
@@ -8281,7 +8305,9 @@ const onMoveToFolder = async () => {
         .filter(file => !successIdSet.has(file.id))
         .map(file => Number(file.id)),
     );
+    noteFilesRemovedInTempView(successIdSet);
     fileList.value = fileList.value.filter(file => !successIdSet.has(file.id));
+    refreshVisibleRowsAfterRemoval();
     totalFileCount.value = fileList.value.length;
     totalFileSize.value = fileList.value.reduce((total, file) => total + file.size, 0);
     selectedItemIndex.value = fileList.value.length > 0
@@ -8483,6 +8509,18 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
       ? dedupTrashGroupKey.value.slice('similar:'.length)
       : dedupTrashGroupKey.value,
   );
+  const isGridDelete = !isDedupTrash.value;
+  // Decided up front: closing the dialog clears the dedup state it depends on.
+  const deleteErrorMessage = (dedupDeleteFileIds.value.length > 0 || selectMode.value)
+    ? getDeleteFilesErrorMessage(permanently)
+    : getDeleteFileErrorMessage(permanently);
+  // Multi-select removals still need the visible rows refreshed (the
+  // single-file path does it in removeFromFileList). If a deleted file had no
+  // loaded row - an unloaded placeholder slot, which cannot be filtered out by
+  // id - the remaining slots no longer match catalog offsets, so the list is
+  // reloaded instead; small deletes stay instant.
+  let refreshRowsAfterRemoval = false;
+  let listMissedDeletes = false;
   try {
     if (dedupDeleteFileIds.value.length > 0) {
       const ids = [...dedupDeleteFileIds.value];
@@ -8591,7 +8629,11 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
           .filter(item => !deletedIdSet.has(Number(item.id)))
           .map(item => Number(item.id)),
       );
+      const rowsBefore = fileList.value.length;
       fileList.value = fileList.value.filter((f) => !deletedIdSet.has(Number(f?.id)));
+      // Count only the selected rows: deleted Live Photo companions are not listed.
+      listMissedDeletes = rowsBefore - fileList.value.length < deletedItems.length;
+      refreshRowsAfterRemoval = true;
       totalFileCount.value = fileList.value.length;
       totalFileSize.value = fileList.value.reduce((total, file) => total + Number(file?.size || 0), 0);
       selectedItemIndex.value = fileList.value.length > 0 ? Math.min(selectedItemIndex.value, fileList.value.length - 1) : -1;
@@ -8642,6 +8684,7 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
     }
 
     if (deletedFileIds.length > 0) {
+      noteFilesRemovedInTempView(deletedFileIds);
       const compareFileCount = removeDeletedFilesFromImageViewerSession(deletedFileIds);
       tauriEmit('files-deleted', {
         source: 'content',
@@ -8659,25 +8702,9 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
     }
 
     if (failedDeleteCount > 0) {
-      if (!permanently && pendingTrashFailedItems.value.length > 0) {
-        if (pendingTrashFailedOtherFailureCount.value > 0) {
-          toast.error(
-            (dedupDeleteFileIds.value.length > 0 || selectMode.value)
-              ? getDeleteFilesErrorMessage(permanently)
-              : getDeleteFileErrorMessage(permanently)
-          );
-        }
-        showTrashFailedMsgbox.value = true;
-      } else {
-        toast.error(
-          (dedupDeleteFileIds.value.length > 0 || selectMode.value)
-            ? getDeleteFilesErrorMessage(permanently)
-            : getDeleteFileErrorMessage(permanently)
-        );
-      }
+      toast.error(deleteErrorMessage);
     }
 
-    closeTrashMsgbox();
     updateSelectedImage(selectedItemIndex.value);
 
     if (shouldUpdateDedup && deletedFileIds.length > 0) {
@@ -8689,23 +8716,20 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
     }
   } catch (error) {
     console.error(`Failed to ${permanently ? 'permanently delete' : 'trash'} file(s):`, error);
-    if (!permanently && pendingTrashFailedItems.value.length > 0) {
-      if (pendingTrashFailedOtherFailureCount.value > 0) {
-        toast.error(
-          (dedupDeleteFileIds.value.length > 0 || selectMode.value)
-            ? getDeleteFilesErrorMessage(permanently)
-            : getDeleteFileErrorMessage(permanently)
-        );
+    toast.error(deleteErrorMessage);
+  } finally {
+    // The dialog closes after every delete, success or not; failures were
+    // reported above.
+    pendingTrashFailedItems.value = [];
+    closeTrashMsgbox();
+    if (isGridDelete && refreshRowsAfterRemoval) {
+      if (listMissedDeletes && !groupedModeActive.value && tempViewMode.value === 'none') {
+        pendingRestoreScrollTop.value = gridViewRef.value?.getScrollTop() ?? null;
+        void updateContent(true);
+      } else {
+        refreshVisibleRowsAfterRemoval();
       }
-      showTrashMsgbox.value = false;
-      showTrashFailedMsgbox.value = true;
-      return;
     }
-    toast.error(
-      (dedupDeleteFileIds.value.length > 0 || selectMode.value)
-        ? getDeleteFilesErrorMessage(permanently)
-        : getDeleteFileErrorMessage(permanently)
-    );
   }
 }
 
@@ -8723,6 +8747,20 @@ async function deleteFileAlways(file: any, permanently = false) {
 }
 
 // remove an file item from the list and update the selected item index
+// After rows are removed in place, later rows shift up: slots not loaded yet
+// can move into view while the visible index range stays the same, and the
+// range handler skips data loading for an unchanged range, leaving blank or
+// stale cells. Reload the visible range once and re-run the layout.
+function refreshVisibleRowsAfterRemoval() {
+  if (groupedModeActive.value) return; // grouped rows are rebuilt after removal
+  const range = { ...lastVisibleRange };
+  lastVisibleRange = { start: -1, end: -1 };
+  scheduleLayoutRefresh();
+  if (range.start >= 0 && range.end >= range.start) {
+    handleVisibleRangeUpdate({ startIndex: range.start, endIndex: range.end });
+  }
+}
+
 function removeFromFileList(index: number = 0) {
   // remove file from list
   fileList.value.splice(index, 1);
@@ -8737,6 +8775,7 @@ function removeFromFileList(index: number = 0) {
   } else {
     selectedItemIndex.value = -1;
   }
+  refreshVisibleRowsAfterRemoval();
 }
 
 async function refreshGroupedRowsAfterDelete(fileIds: number[]) {

@@ -34,6 +34,17 @@ pub fn path_exists(path: &str) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
+/// The path is definitely gone (not just unreadable). Deleting a file that is
+/// already gone counts as done: a row still on screen after its file was
+/// deleted elsewhere made later deletes report failure for files that were
+/// in fact deleted. The parent folder must be reachable: on an unplugged or
+/// offline drive every path is "not found", and treating that as deleted
+/// would drop photos from the catalog while they are still on the drive.
+fn already_gone(path: &str) -> bool {
+    Path::new(path).parent().is_some_and(|parent| parent.is_dir())
+        && matches!(fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 pub fn directory_accessible(path: &str) -> bool {
     if !fs::metadata(path)
         .map(|metadata| metadata.is_dir())
@@ -49,8 +60,8 @@ pub fn directory_accessible(path: &str) -> bool {
 }
 
 pub fn trash_path(path: &str) -> Result<(), String> {
-    if !path_exists(path) {
-        return Err(format!("Path does not exist: {}", path));
+    if already_gone(path) {
+        return Ok(());
     }
 
     move_to_trash(path)?;
@@ -72,19 +83,26 @@ fn move_to_trash(path: &str) -> Result<(), String> {
 /// Move many paths to the Recycle Bin. The shell's recycle costs ~10 ms per
 /// file on NTFS and 50-100 ms on exFAT, so small batches run on a few threads
 /// at once (4 x 10 measured 2-3x faster than one 200-file batch on exFAT) and
-/// progress moves after every batch. Returns, per input path, whether it
-/// existed and is now gone — the same success rule as `trash_path`.
+/// progress moves after every batch. Returns, per input path, whether it is
+/// now gone — the same success rule as `trash_path` (already gone counts).
 /// `on_done` gets the number of paths handled since its last call.
 pub fn trash_paths(paths: &[&str], on_done: &(dyn Fn(usize) + Sync)) -> Vec<bool> {
     const THREADS: usize = 4;
     const BATCH: usize = 10;
     let listed_before = listed_paths(paths);
+    // Not in the folder listing: usually already deleted; otherwise a name the
+    // listing spells differently, checked one by one.
+    let gone_before: HashSet<&str> = paths
+        .iter()
+        .copied()
+        .filter(|path| !listed_before.contains(&path.to_lowercase()) && already_gone(path))
+        .collect();
     // trash canonicalizes every path first, so a missing one would fail its
     // whole batch: send only the paths that exist.
     let existing: Vec<&str> = paths
         .iter()
         .copied()
-        .filter(|path| listed_before.contains(&path.to_lowercase()))
+        .filter(|path| !gone_before.contains(path))
         .collect();
     on_done(paths.len() - existing.len());
     let batches: Vec<&[&str]> = existing.chunks(BATCH).collect();
@@ -105,10 +123,18 @@ pub fn trash_paths(paths: &[&str], on_done: &(dyn Fn(usize) + Sync)) -> Vec<bool
     paths
         .iter()
         .map(|path| {
+            if gone_before.contains(path) {
+                return true;
+            }
             let key = path.to_lowercase();
+            // Unlisted paths count as removed only when provably gone: on an
+            // unplugged drive nothing lists and nothing stats, yet the photo
+            // is still there.
+            let still_there = listed_after.contains(&key)
+                || (!listed_before.contains(&key) && !already_gone(path));
             // A failed or aborted batch leaves some files behind: retry those
             // one by one so a single locked file does not fail its neighbours.
-            listed_before.contains(&key) && (!listed_after.contains(&key) || trash_path(path).is_ok())
+            !still_there || trash_path(path).is_ok()
         })
         .collect()
 }
@@ -131,12 +157,16 @@ fn listed_paths(paths: &[&str]) -> HashSet<String> {
 }
 
 pub fn delete_file_permanently(path: &str) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path).map_err(|e| {
-        format!(
-            "Failed to read metadata before permanent delete: {} ({})",
-            path, e
-        )
-    })?;
+    // One stat: the parent check only runs when the file is not found.
+    let metadata = match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && already_gone(path) => return Ok(()),
+        result => result.map_err(|e| {
+            format!(
+                "Failed to read metadata before permanent delete: {} ({})",
+                path, e
+            )
+        })?,
+    };
 
     if metadata.is_dir() {
         return Err(format!(
@@ -2061,7 +2091,14 @@ pub fn start_folder_mtime_sync(app_handle: tauri::AppHandle) {
         .wrapping_add(1);
 
     tauri::async_runtime::spawn(async move {
-        match sync_dirty_folders_by_mtime(generation) {
+        // Walks every library folder on disk: blocking work, kept off the
+        // async workers and at below-normal priority.
+        let synced = tauri::async_runtime::spawn_blocking(move || {
+            run_at_background_priority(|| sync_dirty_folders_by_mtime(generation))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Folder sync task failed: {}", e)));
+        match synced {
             Ok((result, tasks)) => {
                 if !sync_generation_valid(generation) {
                     return;
@@ -2334,19 +2371,19 @@ fn sync_folder_direct_files(
     // Build a map of file_id → (db_id, db_name) for rename detection.
     // Use the stored inode from the DB record — this works even when the
     // file has been renamed and the old path no longer exists on disk.
-    let db_inodes: HashMap<u64, (i64, String)> = {
-        let mut map = HashMap::new();
-        if let Ok(files) = AFile::get_files_by_folder_id(folder_id) {
-            for file in files {
-                if let (Some(id), Some(inode)) = (file.id, file.inode) {
-                    if inode > 0 {
-                        map.insert(inode as u64, (id, file.name.clone()));
-                    }
+    let mut db_inodes: HashMap<u64, (i64, String)> = HashMap::new();
+    // name → cataloged row, to skip unchanged files.
+    let mut db_files: HashMap<String, AFile> = HashMap::new();
+    if let Ok(files) = AFile::get_files_by_folder_id(folder_id) {
+        for file in files {
+            if let (Some(id), Some(inode)) = (file.id, file.inode) {
+                if inode > 0 {
+                    db_inodes.insert(inode as u64, (id, file.name.clone()));
                 }
             }
+            db_files.insert(file.name.clone(), file);
         }
-        map
-    };
+    }
 
     for entry in WalkDir::new(folder_path)
         .min_depth(1)
@@ -2365,6 +2402,34 @@ fn sync_folder_direct_files(
         };
         let file_name = get_file_name(file_path_str);
         seen_names.insert(file_name.clone());
+
+        // Unchanged file: size and mtime come with the directory listing, so
+        // no per-file open. Opening every file (file id + metadata) of a
+        // 450k-file exFAT folder took ~90 ms each, i.e. tens of hours on
+        // every app start after a single file in that folder changed.
+        if let (Some(db_file), Ok(meta)) = (db_files.get(&file_name), entry.metadata()) {
+            let disk_mtime = systemtime_to_timestamp(meta.modified().ok());
+            if meta.len() as i64 == db_file.size
+                && disk_mtime.is_some()
+                && disk_mtime == db_file.modified_at
+            {
+                // Still queue a missing thumbnail or embedding, as add_to_db's
+                // path did; the cataloged row already says what is missing.
+                if let (Some(ftype), Some(file_id)) = (get_file_type(file_path_str), db_file.id) {
+                    if should_process_synced_file(db_file, ftype) {
+                        tasks.push(SyncedFileTask {
+                            file_id,
+                            file_path: file_path_str.to_string(),
+                            file_type: ftype,
+                            orientation: db_file.e_orientation.unwrap_or(1) as i32,
+                            album_id,
+                            invalidate_thumbnail: false,
+                        });
+                    }
+                }
+                continue;
+            }
+        }
 
         // Record file_id for rename detection.
         if let Some(fid) = file_id(path) {
@@ -2833,17 +2898,19 @@ fn schedule_synced_file_processing(app_handle: tauri::AppHandle, task: SyncedFil
             if album_removal_pending(album_id) || Album::get_album_by_id(album_id).is_err() {
                 return Ok(None);
             }
-            AThumb::get_or_create_thumb(
-                file_id,
-                &file_path_for_thumb,
-                file_type,
-                orientation,
-                FOLDER_SYNC_THUMBNAIL_SIZE,
-                false,
-                false,
-                None,
-                None,
-            )
+            run_at_background_priority(|| {
+                AThumb::get_or_create_thumb(
+                    file_id,
+                    &file_path_for_thumb,
+                    file_type,
+                    orientation,
+                    FOLDER_SYNC_THUMBNAIL_SIZE,
+                    false,
+                    false,
+                    None,
+                    None,
+                )
+            })
         })
         .await;
 
@@ -3377,10 +3444,10 @@ struct FileIndexOutcome {
 }
 
 /// Share of logical cores that library scanning (metadata reads) and
-/// thumbnail generation may each keep busy. No cap: the workers run at
-/// below-normal priority (`run_at_background_priority`), so the UI and other
-/// programs still win the scheduler.
-const SCAN_CPU_SHARE: f64 = 1.0;
+/// thumbnail generation may each keep busy: half the machine, at below-normal
+/// priority (`run_at_background_priority`), so the UI and other programs stay
+/// responsive. All cores made the PC feel sluggish.
+const SCAN_CPU_SHARE: f64 = 0.5;
 
 /// Run `work` on the current thread at below-normal priority, then restore
 /// the old priority (the blocking pool reuses its threads).
@@ -3447,15 +3514,21 @@ struct ProgressSnapshot {
     failed_size: u64,
     scan_total: u64,
     scan_total_size: u64,
+    // Files that will never reach processed / search_ready (preview or
+    // embedding failed). Without them a phase waited on counts that could not
+    // be reached: "preparing previews" stayed on screen, stuck a few dozen
+    // files short of the total, while search indexing ran unseen.
+    preview_failed: u64,
+    search_failed: u64,
 }
 
 impl ProgressSnapshot {
     fn phase(&self) -> &'static str {
         if self.discovered < self.total {
             "discovering"
-        } else if self.processed < self.total {
+        } else if self.processed + self.failed + self.preview_failed < self.total {
             "preparing_previews"
-        } else if self.search_ready < self.search_total {
+        } else if self.search_ready + self.search_failed < self.search_total {
             "preparing_search"
         } else {
             "complete"
@@ -3520,6 +3593,7 @@ impl ProgressTracker {
             failed_size: 0,
             scan_total,
             scan_total_size,
+            ..Default::default()
         };
         Self {
             album_id,
@@ -3739,7 +3813,9 @@ async fn process_thumbnail_task(
                 None,
             )
         }) {
-            Ok(Some(thumb)) if thumb.error_code == 0 => true,
+            // error_code 2: small image shown from the original file; it has a
+            // usable preview and is embedded from the original.
+            Ok(Some(thumb)) if thumb.error_code == 0 || thumb.error_code == 2 => true,
             Ok(Some(_)) => false,
             Ok(None) => false,
             Err(e) => {
@@ -3752,11 +3828,30 @@ async fn process_thumbnail_task(
         }
     })
     .await
-    .map_err(|e| format!("Thumbnail task failed: {}", e))?;
+    // A decoder panic must still be counted below, or the phase never ends.
+    .unwrap_or_else(|e| {
+        eprintln!("Thumbnail task failed for {}: {}", task.file_path, e);
+        false
+    });
 
     if !thumb_ok {
         // The file record was created successfully. A preview failure must not
         // be counted as a scan failure, otherwise it overlaps with Indexed.
+        with_progress_tracker(&tracker, |tracker| {
+            tracker.modify(|snapshot| {
+                // Files already counted as processed (thumbnail existed) must
+                // not be counted again, or the phase advances early.
+                if !task.processed_already_ready {
+                    snapshot.preview_failed += 1;
+                }
+                // Never embedded either way (search_ready_immediately needs an
+                // embedding), so always settle it for the search phase.
+                if matches!(task.file_type, 1 | 3) {
+                    snapshot.search_failed += 1;
+                }
+            });
+            tracker.maybe_emit();
+        });
         return Ok(false);
     }
 
@@ -3817,8 +3912,12 @@ async fn run_embedding_worker(
         .unwrap_or_default();
         // Embedding is supplementary; failed files stay indexed and visible.
         let ready = results.iter().filter(|(_, ok)| *ok).count() as u64;
+        let failed = results.len() as u64 - ready;
         with_progress_tracker(&tracker, |tracker| {
-            tracker.modify(|snapshot| snapshot.search_ready += ready);
+            tracker.modify(|snapshot| {
+                snapshot.search_ready += ready;
+                snapshot.search_failed += failed;
+            });
             tracker.maybe_emit();
         });
     }
@@ -3991,6 +4090,9 @@ pub async fn index_album_worker(
                             snapshot.failed += 1;
                             snapshot.failed_size += file_size;
                             snapshot.current_size += file_size;
+                            if matches!(ftype, 1 | 3) {
+                                snapshot.search_failed += 1;
+                            }
                         });
                         tracker.maybe_emit();
                     });
@@ -4068,6 +4170,9 @@ pub async fn index_album_worker(
                                 snapshot.failed += 1;
                                 snapshot.failed_size += file_size;
                                 snapshot.current_size += file_size;
+                                if matches!(ftype, 1 | 3) {
+                                    snapshot.search_failed += 1;
+                                }
                             });
                             tracker.maybe_emit();
                         });
@@ -4285,7 +4390,39 @@ pub async fn index_album_worker(
 
 #[cfg(test)]
 mod tests {
-    use super::trash_paths;
+    use super::{trash_paths, ProgressSnapshot};
+
+    // A missing file in a reachable folder was deleted; a path whose folder is
+    // unreachable (unplugged drive) must not count as deleted.
+    #[test]
+    fn already_gone_requires_reachable_parent() {
+        let dir = std::env::temp_dir();
+        assert!(super::already_gone(&dir.join("lap-no-such-file.jpg").to_string_lossy()));
+        assert!(!super::already_gone(
+            &dir.join("lap-no-such-dir").join("photo.jpg").to_string_lossy()
+        ));
+        assert!(!super::already_gone(r"Q:\lap-offline-drive\photo.jpg"));
+    }
+
+    // Failed previews / embeddings must not hold a phase open forever.
+    #[test]
+    fn progress_phase_advances_past_failed_files() {
+        let mut snapshot = ProgressSnapshot {
+            discovered: 10,
+            total: 10,
+            search_total: 9,
+            processed: 8,
+            failed: 1,
+            preview_failed: 1,
+            ..Default::default()
+        };
+        assert_eq!(snapshot.phase(), "preparing_search");
+        snapshot.search_ready = 7;
+        snapshot.search_failed = 2;
+        assert_eq!(snapshot.phase(), "complete");
+        snapshot.preview_failed = 0;
+        assert_eq!(snapshot.phase(), "preparing_previews");
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // Puts 25 small files in the Recycle Bin, so run on demand:
@@ -4297,7 +4434,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut paths: Vec<String> = (0..25)
             .map(|i| {
-                let path = dir.join(format!("f{i}.txt"));
+                // Thai names with spaces, like real library files.
+                let path = dir.join(format!("ใหม่ แวมไพร์ Ａ{i}.jpg"));
                 std::fs::write(&path, b"x").unwrap();
                 path.to_string_lossy().into_owned()
             })
@@ -4310,7 +4448,8 @@ mod tests {
         });
         assert_eq!(done.load(Ordering::Relaxed), refs.len());
         assert!(moved[..25].iter().all(|moved| *moved));
-        assert!(!moved[25]);
+        // Already gone counts as deleted (it was, just earlier).
+        assert!(moved[25]);
         assert!(refs[..25].iter().all(|path| !std::path::Path::new(path).exists()));
     }
 }

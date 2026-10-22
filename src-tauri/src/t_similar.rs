@@ -59,6 +59,9 @@ fn get_db_conn() -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     conn.execute("PRAGMA foreign_keys = ON", [])
         .map_err(|e| e.to_string())?;
+    // Wait for other writers (thumbnails, indexing) instead of failing at once.
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
@@ -230,17 +233,20 @@ pub fn start_scan(
     let running = state.is_scanning.clone();
     let cancel = state.cancel_flag.clone();
     std::thread::spawn(move || {
-        let result = scan(
-            &app,
-            &status,
-            &cancel,
-            &scope_key,
-            source_version,
-            similarity_threshold.clamp(0.0, 1.0),
-            params,
-            collection_id,
-            file_ids,
-        );
+        // Background scan: below-normal priority keeps the PC responsive.
+        let result = crate::t_utils::run_at_background_priority(|| {
+            scan(
+                &app,
+                &status,
+                &cancel,
+                &scope_key,
+                source_version,
+                similarity_threshold.clamp(0.0, 1.0),
+                params,
+                collection_id,
+                file_ids,
+            )
+        });
         let mut current = status.lock().unwrap();
         current.state = if result.is_ok() && !cancel.load(Ordering::SeqCst) {
             "finished".into()
